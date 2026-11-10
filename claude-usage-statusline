@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# claude-usage-statusline — Claude Code status line showing plan limits.
+#
+# Renders:  <model> · <dir> <branch> · s 12% w 8% · ⏱47m · $0.42
+#
+# Claude Code runs this on every render, so it never touches the network.
+# Rate limits come from the status line's own stdin payload when Claude Code
+# provides them (Pro/Max, after the first response); otherwise it falls back to
+# the cache that dank-tank-notify keeps warm.
+#
+# Debug:  echo '{}' | claude-usage-statusline --dump   # print the raw payload
+
+set -uo pipefail
+
+CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/claude-usage/usage.json"
+
+IN=$(cat)
+
+if [[ "${1:-}" == "--dump" ]]; then
+  printf '%s\n' "$IN" | jq . 2>/dev/null || printf '%s\n' "$IN"
+  exit 0
+fi
+
+esc=$'\e'
+DIM="${esc}[2m"; OFF="${esc}[0m"; BOLD="${esc}[1m"
+GREEN="${esc}[32m"; YELLOW="${esc}[33m"; ORANGE="${esc}[38;5;208m"; RED="${esc}[31m"
+BLUE="${esc}[38;5;110m"; PURPLE="${esc}[38;5;140m"
+
+tone() { # tone PCT
+  if   (( $1 >= 95 )); then printf '%s' "$RED"
+  elif (( $1 >= 80 )); then printf '%s' "$ORANGE"
+  elif (( $1 >= 50 )); then printf '%s' "$YELLOW"
+  else                      printf '%s' "$GREEN"
+  fi
+}
+
+# Pull the session fields Claude Code always sends. Fields are read one per line
+# rather than tab-split: bash treats tab as IFS whitespace and would collapse
+# empty fields, shifting every value after a missing one.
+mapfile -t F < <(printf '%s' "$IN" | jq -r '
+  [ (.model.display_name // "claude")
+  , (.workspace.current_dir // .cwd // "")
+  , (.cost.total_cost_usd // 0)
+  ] | .[]' 2>/dev/null)
+MODEL=${F[0]:-claude}; CWD=${F[1]:-}; COST=${F[2]:-0}
+
+# Rate limits, if this build of Claude Code passes them. The key names have
+# moved around across releases, so accept every shape we have seen.
+mapfile -t R < <(printf '%s' "$IN" | jq -r '
+  (.rate_limits // {}) as $r
+  | ( $r.five_hour // $r.session // {} ) as $s
+  | ( $r.seven_day // $r.weekly  // {} ) as $w
+  | ( $s.used_percentage // $s.utilization ) as $sp
+  | ( $w.used_percentage // $w.utilization ) as $wp
+  | if $sp == null then empty
+    else [ ($sp | floor), ($wp // 0 | floor), ($s.resets_at // ""), "stdin" ] | .[] end
+  ' 2>/dev/null)
+
+# Fall back to the cache the notifier keeps warm.
+if [[ ${#R[@]} -eq 0 && -r "$CACHE" ]]; then
+  mapfile -t R < <(jq -r '
+    [ (.five_hour.utilization // 0 | floor)
+    , (.seven_day.utilization // 0 | floor)
+    , (.five_hour.resets_at // "")
+    , "cache"
+    ] | .[]' "$CACHE" 2>/dev/null)
+fi
+S_PCT=${R[0]:-}; W_PCT=${R[1]:-0}; S_RESET=${R[2]:-}; SRC=${R[3]:-}
+
+out="${PURPLE}${MODEL}${OFF}"
+
+if [[ -n "$CWD" ]]; then
+  out+=" ${DIM}·${OFF} ${BLUE}${CWD##*/}${OFF}"
+  branch=$(git -C "$CWD" branch --show-current 2>/dev/null)
+  [[ -n "$branch" ]] && out+=" ${DIM}${branch}${OFF}"
+fi
+
+if [[ -n "${S_PCT:-}" ]]; then
+  out+=" ${DIM}·${OFF} $(tone "$S_PCT")s ${S_PCT}%${OFF} $(tone "$W_PCT")w ${W_PCT}%${OFF}"
+
+  # Time left in the 5h window.
+  if [[ -n "${S_RESET:-}" && "$S_RESET" != "null" ]]; then
+    end=$(date -d "$S_RESET" +%s 2>/dev/null)
+    if [[ -n "$end" ]]; then
+      left=$(( end - $(date +%s) )); (( left < 0 )) && left=0
+      if (( left >= 3600 )); then t=$(printf '%dh%02dm' $(( left/3600 )) $(( (left%3600)/60 )))
+      else                        t=$(printf '%dm' $(( left/60 )))
+      fi
+      out+=" ${DIM}⏱${t}${OFF}"
+    fi
+  fi
+  [[ "$SRC" == cache ]] && out+="${DIM}*${OFF}"
+fi
+
+# Session cost, once it rounds to a cent.
+if [[ -n "${COST:-}" ]]; then
+  c=$(awk -v c="$COST" 'BEGIN { printf "%.2f", c }')
+  [[ "$c" != "0.00" ]] && out+=" ${DIM}\$${c}${OFF}"
+fi
+
+printf '%s\n' "$out"

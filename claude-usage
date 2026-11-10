@@ -1,0 +1,280 @@
+#!/usr/bin/env bash
+# claude-usage — read Claude plan limits from the Anthropic OAuth usage endpoint.
+#
+# Fetches session (5h), weekly (7d) and extra-usage spend, caches the response,
+# and prints it as a report, a one-liner, or raw JSON.
+#
+# The access token is read fresh from ~/.claude/.credentials.json on every poll;
+# Claude Code refreshes it in place. We never refresh it ourselves — on 401 we
+# keep the last good values and mark the cache stale.
+
+set -uo pipefail
+
+API="https://api.anthropic.com/api/oauth/usage"
+CREDS="${CLAUDE_CREDENTIALS:-$HOME/.claude/.credentials.json}"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/claude-usage"
+CACHE="$CACHE_DIR/usage.json"
+STALE="$CACHE_DIR/stale"
+MAX_AGE="${CLAUDE_USAGE_MAX_AGE:-60}"
+
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/dank-tank/config.env"
+[[ -r "$CONFIG" ]] || CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/claude-usage/config.env"
+[[ -r "$CONFIG" ]] && . "$CONFIG"
+
+usage() {
+  cat <<'EOF'
+claude-usage — Claude plan limit tracker
+
+  claude-usage              full report
+  claude-usage --line       one compact line
+  claude-usage --json       raw cached JSON
+  claude-usage --bar-json   precomputed fields for a bar widget
+  claude-usage --refresh    force a fetch, ignoring cache age
+  claude-usage --max-age N  treat cache older than N seconds as stale (default 60)
+  claude-usage --no-color   plain output
+
+Exit codes: 0 ok · 2 no credentials · 3 token rejected (run any `claude` command) · 4 network
+EOF
+}
+
+# ---------------------------------------------------------------- fetch + cache
+
+fetch() {
+  mkdir -p "$CACHE_DIR"
+
+  local token
+  token=$(jq -r '.claudeAiOauth.accessToken // empty' "$CREDS" 2>/dev/null)
+  [[ -z "$token" ]] && return 2
+
+  local tmp code
+  tmp=$(mktemp "$CACHE_DIR/.fetch.XXXXXX")
+  code=$(curl -sS --max-time 10 -o "$tmp" -w '%{http_code}' "$API" \
+    -H 'Accept: application/json' \
+    -H "Authorization: Bearer $token" \
+    -H 'anthropic-beta: oauth-2025-04-20' 2>/dev/null)
+
+  case "$code" in
+    200)
+      if jq -e . "$tmp" >/dev/null 2>&1; then
+        mv "$tmp" "$CACHE"; rm -f "$STALE"; return 0
+      fi
+      rm -f "$tmp"; return 4 ;;
+    401|403) rm -f "$tmp"; touch "$STALE"; return 3 ;;
+    *)       rm -f "$tmp"; touch "$STALE"; return 4 ;;
+  esac
+}
+
+# Fetch only if the cache is missing or older than MAX_AGE. Always leaves the
+# last good payload in $CACHE so callers can degrade gracefully.
+ensure_cache() {
+  local force="${1:-0}" age=99999
+  if [[ -f "$CACHE" ]]; then
+    age=$(( $(date +%s) - $(stat -c %Y "$CACHE") ))
+  fi
+  if [[ "$force" == 1 || "$age" -ge "$MAX_AGE" ]]; then
+    fetch; return $?
+  fi
+  return 0
+}
+
+# ------------------------------------------------------------------- formatting
+
+# humanize SECONDS -> "3d5h" / "4h12m" / "37m"
+humanize() {
+  local s=$1
+  (( s < 0 )) && s=0
+  if   (( s >= 86400 )); then printf '%dd%dh' $(( s/86400 )) $(( (s%86400)/3600 ))
+  elif (( s >= 3600  )); then printf '%dh%dm' $(( s/3600 ))  $(( (s%3600)/60 ))
+  else                        printf '%dm'    $(( s/60 ))
+  fi
+}
+
+# epoch seconds for an ISO-8601 timestamp; empty string if unparseable
+epoch() {
+  [[ -z "${1:-}" || "$1" == "null" ]] && { echo ""; return; }
+  date -d "$1" +%s 2>/dev/null || echo ""
+}
+
+# bar PCT WIDTH
+bar() {
+  local pct=$1 width=$2 filled i out=''
+  (( pct < 0 )) && pct=0; (( pct > 100 )) && pct=100
+  filled=$(( pct * width / 100 ))
+  for (( i = 0; i < width; i++ )); do
+    (( i < filled )) && out+='█' || out+='░'
+  done
+  printf '%s' "$out"
+}
+
+# color code for a percentage
+tone() {
+  local pct=$1
+  if   (( pct >= 95 )); then printf '%s' "$C_CRIT"
+  elif (( pct >= 80 )); then printf '%s' "$C_HIGH"
+  elif (( pct >= 50 )); then printf '%s' "$C_MID"
+  else                       printf '%s' "$C_LOW"
+  fi
+}
+
+# pace SYMBOL: compares consumption against how far into the window we are.
+# Prints "↑" burning ahead of schedule, "→" on track, "↓" comfortably under.
+pace() {
+  local delta=$(( $1 - $2 ))
+  if   (( delta >  10 )); then printf '↑'
+  elif (( delta < -10 )); then printf '↓'
+  else                         printf '→'
+  fi
+}
+
+# ------------------------------------------------------------------ data access
+
+# Reads the cache into globals. Percentages are integers.
+load() {
+  [[ -f "$CACHE" ]] || return 1
+
+  # One field per line, not tab-split: bash treats tab as IFS whitespace and
+  # collapses empty fields, which would shift every value after a missing one.
+  local -a f
+  mapfile -t f < <(jq -r '
+    [ (.five_hour.utilization // 0 | floor)
+    , (.five_hour.resets_at // "")
+    , (.seven_day.utilization // 0 | floor)
+    , (.seven_day.resets_at // "")
+    , (.spend.enabled // false)
+    , (.spend.percent // 0 | floor)
+    , (.spend.used.amount_minor // 0)
+    , (.spend.limit.amount_minor // 0)
+    , (.spend.used.currency // "")
+    , (.spend.used.exponent // 2)
+    ] | .[]' "$CACHE" 2>/dev/null)
+  (( ${#f[@]} == 10 )) || return 1
+
+  S_PCT=${f[0]}; S_RESET=${f[1]}; W_PCT=${f[2]}; W_RESET=${f[3]}
+  SPEND_ON=${f[4]}; SPEND_PCT=${f[5]}; SPEND_USED=${f[6]}
+  SPEND_LIMIT=${f[7]}; SPEND_CUR=${f[8]}; SPEND_EXP=${f[9]}
+
+  # Window start is reset time minus the window length, which gives us elapsed %.
+  local now s_end w_end
+  now=$(date +%s)
+  s_end=$(epoch "$S_RESET"); w_end=$(epoch "$W_RESET")
+
+  S_LEFT=""; S_ELAPSED=0
+  if [[ -n "$s_end" ]]; then
+    S_LEFT=$(( s_end - now ))
+    S_ELAPSED=$(( (18000 - S_LEFT) * 100 / 18000 ))
+  fi
+  W_LEFT=""; W_ELAPSED=0
+  if [[ -n "$w_end" ]]; then
+    W_LEFT=$(( w_end - now ))
+    W_ELAPSED=$(( (604800 - W_LEFT) * 100 / 604800 ))
+  fi
+  (( S_ELAPSED < 0 )) && S_ELAPSED=0; (( S_ELAPSED > 100 )) && S_ELAPSED=100
+  (( W_ELAPSED < 0 )) && W_ELAPSED=0; (( W_ELAPSED > 100 )) && W_ELAPSED=100
+  return 0
+}
+
+money() { # money AMOUNT_MINOR EXPONENT CURRENCY
+  local minor=$1 exp=$2 cur=$3
+  awk -v m="$minor" -v e="$exp" -v c="$cur" \
+    'BEGIN { printf "%s %.*f", c, e, m / (10 ^ e) }'
+}
+
+# ---------------------------------------------------------------------- outputs
+
+report() {
+  local stale='' ; [[ -f "$STALE" ]] && stale=" ${C_DIM}(stale)${C_OFF}"
+  printf '%s\n' "${C_BOLD}Claude usage${C_OFF}$stale"
+
+  printf '  %-8s %s%s%s %3d%%  %s  resets in %s\n' 'session' \
+    "$(tone "$S_PCT")" "$(bar "$S_PCT" 20)" "$C_OFF" "$S_PCT" \
+    "$(pace "$S_PCT" "$S_ELAPSED")" "$(humanize "${S_LEFT:-0}")"
+
+  printf '  %-8s %s%s%s %3d%%  %s  resets in %s\n' 'weekly' \
+    "$(tone "$W_PCT")" "$(bar "$W_PCT" 20)" "$C_OFF" "$W_PCT" \
+    "$(pace "$W_PCT" "$W_ELAPSED")" "$(humanize "${W_LEFT:-0}")"
+
+  if [[ "$SPEND_ON" == true ]]; then
+    printf '  %-8s %s%s%s %3d%%  %s of %s\n' 'credits' \
+      "$(tone "$SPEND_PCT")" "$(bar "$SPEND_PCT" 20)" "$C_OFF" "$SPEND_PCT" \
+      "$(money "$SPEND_USED" "$SPEND_EXP" "$SPEND_CUR")" \
+      "$(money "$SPEND_LIMIT" "$SPEND_EXP" "$SPEND_CUR")"
+  fi
+
+  printf '  %s↑ ahead of pace · → on track · ↓ under%s\n' "$C_DIM" "$C_OFF"
+}
+
+# Everything a bar widget needs, precomputed: percentages, countdowns, pacing
+# and formatted money, so the widget itself needs no date or currency logic.
+bar_json() {
+  local stale=false; [[ -f "$STALE" ]] && stale=true
+  jq -n \
+    --argjson s_pct "$S_PCT" --arg s_left "$(humanize "${S_LEFT:-0}")" \
+    --arg s_pace "$(pace "$S_PCT" "$S_ELAPSED")" \
+    --argjson w_pct "$W_PCT" --arg w_left "$(humanize "${W_LEFT:-0}")" \
+    --arg w_pace "$(pace "$W_PCT" "$W_ELAPSED")" \
+    --argjson sp_on "$([[ "$SPEND_ON" == true ]] && echo true || echo false)" \
+    --argjson sp_pct "$SPEND_PCT" \
+    --arg sp_used "$(money "$SPEND_USED" "$SPEND_EXP" "$SPEND_CUR")" \
+    --arg sp_limit "$(money "$SPEND_LIMIT" "$SPEND_EXP" "$SPEND_CUR")" \
+    --argjson stale "$stale" \
+    '{ session: {pct:$s_pct, left:$s_left, pace:$s_pace},
+       weekly:  {pct:$w_pct, left:$w_left, pace:$w_pace},
+       spend:   {enabled:$sp_on, pct:$sp_pct, used:$sp_used, limit:$sp_limit},
+       stale:   $stale }'
+}
+
+line() {
+  printf '%ss %d%%%s · %sw %d%%%s' \
+    "$(tone "$S_PCT")" "$S_PCT" "$C_OFF" \
+    "$(tone "$W_PCT")" "$W_PCT" "$C_OFF"
+  [[ "$SPEND_ON" == true ]] && printf ' · %s%s%s' \
+    "$(tone "$SPEND_PCT")" "$(money "$SPEND_USED" "$SPEND_EXP" "$SPEND_CUR")" "$C_OFF"
+  printf '\n'
+}
+
+# ------------------------------------------------------------------------- main
+
+MODE=report
+FORCE=0
+COLOR=auto
+
+while (( $# )); do
+  case "$1" in
+    --line)     MODE=line ;;
+    --json)     MODE=json ;;
+    --bar-json) MODE=bar ;;
+    --refresh)  FORCE=1 ;;
+    --max-age)  MAX_AGE="$2"; shift ;;
+    --no-color) COLOR=never ;;
+    -h|--help)  usage; exit 0 ;;
+    *)          printf 'unknown option: %s\n' "$1" >&2; usage >&2; exit 64 ;;
+  esac
+  shift
+done
+
+if [[ "$COLOR" == auto && -t 1 ]] || [[ "$COLOR" == always ]]; then
+  C_LOW=$'\e[32m'; C_MID=$'\e[33m'; C_HIGH=$'\e[38;5;208m'; C_CRIT=$'\e[31m'
+  C_DIM=$'\e[2m'; C_BOLD=$'\e[1m'; C_OFF=$'\e[0m'
+else
+  C_LOW=''; C_MID=''; C_HIGH=''; C_CRIT=''; C_DIM=''; C_BOLD=''; C_OFF=''
+fi
+
+ensure_cache "$FORCE"; rc=$?
+
+if ! load; then
+  case $rc in
+    2) echo "claude-usage: no credentials at $CREDS — log in with \`claude\`" >&2 ;;
+    3) echo "claude-usage: token rejected — run any \`claude\` command to refresh" >&2 ;;
+    *) echo "claude-usage: could not reach the usage API and no cache is available" >&2 ;;
+  esac
+  exit $(( rc == 0 ? 4 : rc ))
+fi
+
+case "$MODE" in
+  json) cat "$CACHE" ;;
+  bar)  bar_json ;;
+  line) line ;;
+  *)    report ;;
+esac
+
+exit 0

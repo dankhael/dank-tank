@@ -1,0 +1,272 @@
+#!/usr/bin/env bash
+# dank-tank-notify — unified Claude, Codex, Antigravity and OpenCode Go limit alerts.
+#
+# Every limit keeps independent window/threshold state. Events found in the same
+# timer run are batched into one desktop notification to avoid alert storms.
+
+set -uo pipefail
+
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+CLAUDE_USAGE="${CLAUDE_USAGE_BIN:-$HERE/claude-usage}"
+CODEX_USAGE="${CODEX_USAGE_BIN:-$HERE/codex-usage}"
+ANTIGRAVITY_USAGE="${ANTIGRAVITY_USAGE_BIN:-$HERE/antigravity-usage}"
+OPENCODE_USAGE="${OPENCODE_USAGE_BIN:-$HERE/opencode-usage}"
+[[ -x "$CLAUDE_USAGE" ]] || CLAUDE_USAGE=claude-usage
+[[ -x "$CODEX_USAGE" ]] || CODEX_USAGE=codex-usage
+[[ -x "$ANTIGRAVITY_USAGE" ]] || ANTIGRAVITY_USAGE=antigravity-usage
+[[ -x "$OPENCODE_USAGE" ]] || OPENCODE_USAGE=opencode-usage
+
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/dank-tank"
+STATE="$CACHE_DIR/notify-state.json"
+# Before the rename the threshold history lived next to claude-usage's cache.
+OLD_STATE="${XDG_CACHE_HOME:-$HOME/.cache}/claude-usage/notify-state.json"
+
+SESSION_THRESHOLDS="50 80 95"
+WEEKLY_THRESHOLDS="50 80 95"
+SPEND_THRESHOLDS="50 80 95"
+CODEX_SESSION_THRESHOLDS=""
+CODEX_WEEKLY_THRESHOLDS=""
+ANTIGRAVITY_SESSION_THRESHOLDS=""
+ANTIGRAVITY_WEEKLY_THRESHOLDS=""
+OPENCODE_SESSION_THRESHOLDS=""
+OPENCODE_WEEKLY_THRESHOLDS=""
+OPENCODE_MONTHLY_THRESHOLDS=""
+NOTIFY_ON_RESET=1
+RESET_NOTICE_ABOVE=80
+APP_NAME="dank-tank"
+
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/dank-tank/config.env"
+[[ -r "$CONFIG" ]] || CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/claude-usage/config.env"
+[[ -r "$CONFIG" ]] && . "$CONFIG"
+
+# New providers inherit the established Claude thresholds unless explicitly
+# configured. Also migrate the old generated app names without rewriting config.
+CODEX_SESSION_THRESHOLDS=${CODEX_SESSION_THRESHOLDS:-$SESSION_THRESHOLDS}
+CODEX_WEEKLY_THRESHOLDS=${CODEX_WEEKLY_THRESHOLDS:-$WEEKLY_THRESHOLDS}
+ANTIGRAVITY_SESSION_THRESHOLDS=${ANTIGRAVITY_SESSION_THRESHOLDS:-$SESSION_THRESHOLDS}
+ANTIGRAVITY_WEEKLY_THRESHOLDS=${ANTIGRAVITY_WEEKLY_THRESHOLDS:-$WEEKLY_THRESHOLDS}
+OPENCODE_SESSION_THRESHOLDS=${OPENCODE_SESSION_THRESHOLDS:-$SESSION_THRESHOLDS}
+OPENCODE_WEEKLY_THRESHOLDS=${OPENCODE_WEEKLY_THRESHOLDS:-$WEEKLY_THRESHOLDS}
+OPENCODE_MONTHLY_THRESHOLDS=${OPENCODE_MONTHLY_THRESHOLDS:-$OPENCODE_WEEKLY_THRESHOLDS}
+[[ "$APP_NAME" == "Claude Usage" || "$APP_NAME" == "AI Usage" ]] && APP_NAME="dank-tank"
+
+DRY=0
+case "${1:-}" in
+  --dry-run) DRY=1 ;;
+  --test)    notify-send -a "$APP_NAME" -u normal -i dialog-information \
+               "dank-tank" "Claude, Codex, Antigravity and OpenCode notifications are working."; exit $? ;;
+  --status)  [[ -f "$STATE" ]] && jq . "$STATE" || echo '{}'; exit 0 ;;
+  --reset)   rm -f "$STATE"; echo "threshold state cleared"; exit 0 ;;
+  "")        ;;
+  *)         echo "unknown option: $1" >&2; exit 64 ;;
+esac
+
+# A timer without a desktop bus can still warm pull-based provider caches.
+if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
+  if [[ -S "${XDG_RUNTIME_DIR:-/run/user/$UID}/bus" ]]; then
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR:-/run/user/$UID}/bus"
+  else
+    "$CLAUDE_USAGE" --refresh --no-color >/dev/null 2>&1 || true
+    "$CODEX_USAGE" --refresh --bar-json >/dev/null 2>&1 || true
+    "$OPENCODE_USAGE" --refresh --bar-json >/dev/null 2>&1 || true
+    exit 0
+  fi
+fi
+
+mkdir -p "$CACHE_DIR"
+[[ ! -f "$STATE" && -f "$OLD_STATE" ]] && cp "$OLD_STATE" "$STATE"
+if (( DRY )); then
+  DRY_STATE="$CACHE_DIR/notify-state.dry.json"
+  cp -f "$STATE" "$DRY_STATE" 2>/dev/null || echo '{}' > "$DRY_STATE"
+  STATE="$DRY_STATE"
+fi
+[[ -f "$STATE" ]] || echo '{}' > "$STATE"
+
+# Preserve threshold history from versions where Claude used unprefixed keys.
+jq '
+  if .["claude-session"] == null and .session != null then .["claude-session"] = .session else . end |
+  if .["claude-weekly"] == null and .weekly != null then .["claude-weekly"] = .weekly else . end |
+  if .["claude-spend"] == null and .spend != null then .["claude-spend"] = .spend else . end |
+  del(.session,.weekly,.spend)
+' "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
+
+# ---------------------------------------------------------------- notification queue
+
+QUEUE_KEYS=(); QUEUE_URGENCIES=(); QUEUE_ICONS=(); QUEUE_TITLES=(); QUEUE_BODIES=()
+
+queue() { # queue KEY URGENCY ICON TITLE BODY
+  QUEUE_KEYS+=("$1"); QUEUE_URGENCIES+=("$2"); QUEUE_ICONS+=("$3")
+  QUEUE_TITLES+=("$4"); QUEUE_BODIES+=("$5")
+}
+
+flush() {
+  local count=${#QUEUE_KEYS[@]} i urgency=low icon=dialog-information title body=''
+  (( count > 0 )) || return 0
+
+  if (( DRY )); then
+    for (( i=0; i<count; i++ )); do
+      printf '[dry-run] (%s) %s — %s\n' "${QUEUE_URGENCIES[i]}" "${QUEUE_TITLES[i]}" "${QUEUE_BODIES[i]}"
+    done
+    return 0
+  fi
+
+  for (( i=0; i<count; i++ )); do
+    [[ "${QUEUE_URGENCIES[i]}" == normal ]] && urgency=normal
+    if [[ "${QUEUE_URGENCIES[i]}" == critical ]]; then urgency=critical; break; fi
+  done
+  [[ "$urgency" != low ]] && icon=dialog-warning
+
+  if (( count == 1 )); then
+    title=${QUEUE_TITLES[0]}; body=${QUEUE_BODIES[0]}; icon=${QUEUE_ICONS[0]}
+  else
+    title="dank-tank — ${count} updates"
+    for (( i=0; i<count; i++ )); do
+      [[ -n "$body" ]] && body+=$'\n'
+      body+="${QUEUE_TITLES[i]} — ${QUEUE_BODIES[i]}"
+    done
+  fi
+
+  notify-send -a "$APP_NAME" -u "$urgency" -i "$icon" \
+    -h "string:x-canonical-private-synchronous:dank-tank-summary" "$title" "$body"
+}
+
+urgency_for() {
+  if   (( $1 >= 95 )); then printf 'critical'
+  elif (( $1 >= 80 )); then printf 'normal'
+  else                      printf 'low'
+  fi
+}
+
+icon_for() {
+  if (( $1 >= 80 )); then printf 'dialog-warning'; else printf 'dialog-information'; fi
+}
+
+resets_in() { # ISO timestamp, @epoch, or anything accepted by GNU date
+  local end left
+  end=$(date -d "${1:-}" +%s 2>/dev/null) || { printf 'reset time unknown'; return; }
+  left=$(( end - $(date +%s) )); (( left < 0 )) && left=0
+  if   (( left >= 86400 )); then printf 'resets in %dd%dh' $(( left/86400 )) $(( (left%86400)/3600 ))
+  elif (( left >= 3600  )); then printf 'resets in %dh%02dm' $(( left/3600 )) $(( (left%3600)/60 ))
+  else                           printf 'resets in %dm' $(( left/60 ))
+  fi
+}
+
+# check CATEGORY LABEL PCT WINDOW THRESHOLDS RESET_PHRASE
+check() {
+  local key=$1 label=$2 pct=$3 win=$4 thresholds=$5 phrase=$6
+  local prev_win prev_peak t hit='' drop
+  [[ "$pct" =~ ^[0-9]+$ ]] || return 0
+
+  prev_win=$(jq -r --arg k "$key" '.[$k].window // ""' "$STATE")
+  prev_peak=$(jq -r --arg k "$key" '.[$k].peak // 0' "$STATE")
+
+  if [[ "$win" != "$prev_win" ]]; then
+    drop=$(( prev_peak - pct ))
+    if [[ -z "$prev_win" ]] || (( pct <= 10 || drop >= 10 )); then
+      if (( NOTIFY_ON_RESET )) && [[ -n "$prev_win" ]] && (( prev_peak >= RESET_NOTICE_ABOVE )); then
+        queue "$key" normal dialog-information "$label reset" "Back to ${pct}% — ${phrase}"
+      fi
+      jq --arg k "$key" --arg w "$win" --argjson p "$pct" \
+        '.[$k] = {window:$w, peak:$p, fired:[]}' "$STATE" > "$STATE.tmp" \
+        && mv "$STATE.tmp" "$STATE"
+      prev_peak=$pct
+    else
+      # Rolling-window APIs may move resets_at without resetting utilization.
+      # Preserve fired thresholds so a timestamp adjustment cannot alert twice.
+      jq --arg k "$key" --arg w "$win" '.[$k].window = $w' "$STATE" > "$STATE.tmp" \
+        && mv "$STATE.tmp" "$STATE"
+    fi
+  fi
+
+  for t in $thresholds; do
+    if (( pct >= t )) && [[ $(jq -r --arg k "$key" --argjson t "$t" \
+      '(.[$k].fired // []) | index($t) // "no"' "$STATE") == no ]]; then
+      hit=$t
+    fi
+  done
+
+  if [[ -n "$hit" ]]; then
+    queue "$key" "$(urgency_for "$pct")" "$(icon_for "$pct")" "$label at ${pct}%" "$phrase"
+    jq --arg k "$key" --argjson pct "$pct" --argjson all "[${thresholds// /,}]" \
+      '.[$k].fired = [ $all[] | select(. <= $pct) ]' "$STATE" > "$STATE.tmp" \
+      && mv "$STATE.tmp" "$STATE"
+  fi
+
+  if (( pct > prev_peak )); then
+    jq --arg k "$key" --argjson p "$pct" '.[$k].peak = $p' "$STATE" > "$STATE.tmp" \
+      && mv "$STATE.tmp" "$STATE"
+  fi
+}
+
+# ---------------------------------------------------------------- Claude
+
+"$CLAUDE_USAGE" --refresh --no-color >/dev/null 2>&1
+claude_rc=$?
+if (( claude_rc == 0 )); then
+  rm -f "$CACHE_DIR/.auth-warned"
+  mapfile -t U < <("$CLAUDE_USAGE" --json 2>/dev/null | jq -r '
+    [ (.five_hour.utilization // 0 | floor), (.five_hour.resets_at // ""),
+      (.seven_day.utilization // 0 | floor), (.seven_day.resets_at // ""),
+      (.spend.enabled // false), (.spend.percent // 0 | floor) ] | .[]')
+  if (( ${#U[@]} == 6 )); then
+    check claude-session "Claude session (5h)" "${U[0]}" "${U[1]}" "$SESSION_THRESHOLDS" "$(resets_in "${U[1]}")"
+    check claude-weekly "Claude weekly (7d)" "${U[2]}" "${U[3]}" "$WEEKLY_THRESHOLDS" "$(resets_in "${U[3]}")"
+    if [[ "${U[4]}" == true ]]; then
+      mapfile -t M < <("$CLAUDE_USAGE" --json 2>/dev/null | jq -r '
+        [(.spend.used.amount_minor // 0),(.spend.limit.amount_minor // 0),
+         (.spend.used.exponent // 2),(.spend.used.currency // "")] | .[]')
+      spent=$(awk -v u="${M[0]}" -v l="${M[1]}" -v e="${M[2]}" -v c="${M[3]}" \
+        'BEGIN { d=10^e; printf "%s %.*f of %s %.*f",c,e,u/d,c,e,l/d }')
+      check claude-spend "Claude extra credits" "${U[5]}" "$(date +%Y-%m)" "$SPEND_THRESHOLDS" "$spent"
+    fi
+  fi
+elif (( claude_rc == 3 )); then
+  marker="$CACHE_DIR/.auth-warned"
+  if [[ ! -f "$marker" ]] || (( $(date +%s) - $(stat -c %Y "$marker") > 86400 )); then
+    touch "$marker"
+    queue claude-auth normal dialog-warning "Claude authentication" "Token expired — run any \`claude\` command."
+  fi
+fi
+
+# ---------------------------------------------------------------- Codex
+
+codex_data=$("$CODEX_USAGE" --refresh --bar-json 2>/dev/null) || codex_data=''
+if [[ -n "$codex_data" ]]; then
+  while IFS=$'\t' read -r name pct minutes reset; do
+    [[ -n "$name" ]] || continue
+    key=${name//[^a-zA-Z0-9]/-}
+    thresholds=$CODEX_SESSION_THRESHOLDS
+    (( minutes >= 10080 )) && thresholds=$CODEX_WEEKLY_THRESHOLDS
+    check "codex-$key" "Codex $name" "$pct" "$reset" "$thresholds" "$(resets_in "@$reset")"
+  done < <(jq -r '.windows[] | [.name,.pct,.minutes,.resets_at] | @tsv' <<<"$codex_data")
+fi
+
+# ---------------------------------------------------------------- Antigravity
+
+agy_data=$("$ANTIGRAVITY_USAGE" --bar-json 2>/dev/null) || agy_data=''
+if [[ -n "$agy_data" && $(jq -r '.stale == false' <<<"$agy_data") == true ]]; then
+  while IFS=$'\t' read -r group_id group_label name pct reset; do
+    [[ -n "$group_id" && -n "$name" ]] || continue
+    key=${group_id//[^a-zA-Z0-9]/-}-${name//[^a-zA-Z0-9]/-}
+    thresholds=$ANTIGRAVITY_SESSION_THRESHOLDS
+    [[ "$name" == weekly ]] && thresholds=$ANTIGRAVITY_WEEKLY_THRESHOLDS
+    check "agy-$key" "Antigravity $group_label $name" "$pct" "$reset" "$thresholds" "$(resets_in "@$reset")"
+  done < <(jq -r '.groups[] | .id as $id | .label as $label | .windows[] |
+    [$id,$label,.name,.pct,.resets_at] | @tsv' <<<"$agy_data")
+fi
+
+# ---------------------------------------------------------------- OpenCode Go
+
+opencode_data=$("$OPENCODE_USAGE" --refresh --bar-json 2>/dev/null) || opencode_data=''
+if [[ -n "$opencode_data" && $(jq -r '.stale == false' <<<"$opencode_data") == true ]]; then
+  while IFS=$'\t' read -r name pct minutes reset; do
+    [[ -n "$name" ]] || continue
+    thresholds=$OPENCODE_SESSION_THRESHOLDS
+    (( minutes >= 10080 )) && thresholds=$OPENCODE_WEEKLY_THRESHOLDS
+    (( minutes >  10080 )) && thresholds=$OPENCODE_MONTHLY_THRESHOLDS
+    check "opencode-${name//[^a-zA-Z0-9]/-}" "OpenCode Go $name" "$pct" "$reset" "$thresholds" "$(resets_in "@$reset")"
+  done < <(jq -r '.windows[] | [.name,.pct,.minutes,.resets_at] | @tsv' <<<"$opencode_data")
+fi
+
+flush
+exit 0

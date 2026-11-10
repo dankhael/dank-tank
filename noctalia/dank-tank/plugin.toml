@@ -1,0 +1,130 @@
+# dank-tank: Claude, Codex, Antigravity and OpenCode Go plan usage in the noctalia bar.
+#
+# The widget owns no quota arithmetic — it shells out to `claude-usage` and
+# provider commands, which cache their respective snapshots and precompute reset
+# countdowns and pacing.
+#
+# Two entries share one script: the bar widget shows the worst window per agent,
+# and the `detail` panel it toggles shows every window. Each entry runs in its
+# own VM and calls its own entry point, so usage.luau serves both.
+#
+# Add it from Settings -> Bar -> (a lane) -> Add widget -> dank-tank.
+
+id = "dankhael/dank-tank"
+name = "dank-tank"
+version = "3.0.0"
+plugin_api = 16
+author = "dankhael"
+license = "MIT"
+dependencies = []
+tags = ["claude", "codex", "antigravity", "agy", "opencode", "usage", "monitor"]
+icon = "gauge"
+description = "Claude, Codex, Antigravity and OpenCode Go plan limits in the bar."
+
+# Plugin-level settings: the bar widget and the detail panel read the same
+# commands and the same thresholds, so they are declared once here (Settings ->
+# Plugins) instead of per entry.
+
+[[setting]]
+key = "command"
+type = "string"
+label_key = "settings.command.label"
+description_key = "settings.command.description"
+default = "~/.local/bin/claude-usage"
+
+[[setting]]
+key = "codex_command"
+type = "string"
+label_key = "settings.codex_command.label"
+description_key = "settings.codex_command.description"
+default = "~/.local/bin/codex-usage"
+
+[[setting]]
+key = "show_codex"
+type = "bool"
+label_key = "settings.show_codex.label"
+description_key = "settings.show_codex.description"
+default = true
+
+[[setting]]
+key = "antigravity_command"
+type = "string"
+label_key = "settings.antigravity_command.label"
+description_key = "settings.antigravity_command.description"
+default = "~/.local/bin/antigravity-usage"
+
+[[setting]]
+key = "show_antigravity"
+type = "bool"
+label_key = "settings.show_antigravity.label"
+description_key = "settings.show_antigravity.description"
+default = true
+
+[[setting]]
+key = "opencode_command"
+type = "string"
+label_key = "settings.opencode_command.label"
+description_key = "settings.opencode_command.description"
+default = "~/.local/bin/opencode-usage"
+
+[[setting]]
+key = "show_opencode"
+type = "bool"
+label_key = "settings.show_opencode.label"
+description_key = "settings.show_opencode.description"
+default = true
+
+[[setting]]
+key = "show_spend"
+type = "bool"
+label_key = "settings.show_spend.label"
+description_key = "settings.show_spend.description"
+default = false
+
+[[setting]]
+key = "glyph"
+type = "glyph"
+label_key = "settings.glyph.label"
+default = "gauge"
+
+# The command caches for 60s by default, so polling faster than that mostly
+# re-reads the same file rather than hitting the network.
+[[setting]]
+key = "refresh_seconds"
+type = "int"
+label_key = "settings.refresh_seconds.label"
+description_key = "settings.refresh_seconds.description"
+default = 60
+
+[[setting]]
+key = "warn_at"
+type = "int"
+label_key = "settings.warn_at.label"
+description_key = "settings.warn_at.description"
+default = 50
+
+[[setting]]
+key = "warn_color"
+type = "color"
+label_key = "settings.warn_color.label"
+description_key = "settings.warn_color.description"
+default = "#e0af68"
+
+[[setting]]
+key = "alert_at"
+type = "int"
+label_key = "settings.alert_at.label"
+description_key = "settings.alert_at.description"
+default = 80
+
+[[widget]]
+id = "usage"
+entry = "usage.luau"
+
+[[panel]]
+id = "detail"
+entry = "usage.luau"
+width = 430
+height = 640
+placement = "attached"
+open_near_click = true

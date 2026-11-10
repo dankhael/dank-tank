@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+# codex-usage — read ChatGPT Codex plan limits through the local app-server.
+#
+# This deliberately talks to the Codex CLI instead of reading auth.json. Codex
+# owns token refresh and the backend protocol; this script only asks for the
+# same account/rateLimits snapshot used by first-party Codex clients.
+
+set -uo pipefail
+
+CODEX_BIN="${CODEX_USAGE_BIN:-codex}"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/codex-usage"
+CACHE="$CACHE_DIR/rate-limits.json"
+STALE="$CACHE_DIR/stale"
+MAX_AGE="${CODEX_USAGE_MAX_AGE:-60}"
+
+usage() {
+  cat <<'EOF'
+codex-usage — Codex plan limit tracker
+
+  codex-usage              compact report
+  codex-usage --json       raw account/rateLimits/read result
+  codex-usage --bar-json   precomputed fields for a bar widget
+  codex-usage --refresh    force a fresh query
+  codex-usage --max-age N  cache age in seconds (default 60)
+
+Exit codes: 0 ok · 2 Codex unavailable/not logged in · 4 query failed
+EOF
+}
+
+stop_server() {
+  if [[ -n "${CODEX_APP_PID:-}" ]]; then
+    kill "$CODEX_APP_PID" 2>/dev/null || true
+    wait "$CODEX_APP_PID" 2>/dev/null || true
+  fi
+}
+
+# Read one JSON-RPC response with the requested numeric id. Notifications may
+# arrive between responses, so ignore every other line.
+read_response() { # read_response ID TIMEOUT
+  local wanted=$1 timeout=$2 line id
+  local deadline=$(( $(date +%s) + timeout ))
+  while (( $(date +%s) < deadline )); do
+    if IFS= read -r -t 1 line <&"${CODEX_APP[0]}"; then
+      id=$(jq -r '.id // empty' <<<"$line" 2>/dev/null)
+      if [[ "$id" == "$wanted" ]]; then
+        RESPONSE=$line
+        return 0
+      fi
+    elif ! kill -0 "$CODEX_APP_PID" 2>/dev/null; then
+      return 1
+    fi
+  done
+  return 1
+}
+
+fetch() {
+  command -v "$CODEX_BIN" >/dev/null 2>&1 || return 2
+  mkdir -p "$CACHE_DIR"
+
+  local tmp init response
+  tmp=$(mktemp "$CACHE_DIR/.fetch.XXXXXX")
+
+  coproc CODEX_APP { "$CODEX_BIN" app-server --listen stdio:// 2>/dev/null; }
+  printf '%s\n' \
+    '{"id":1,"method":"initialize","params":{"clientInfo":{"name":"codex-usage","version":"1.0"},"capabilities":{"experimentalApi":true}}}' \
+    >&"${CODEX_APP[1]}"
+  if ! read_response 1 8; then
+    stop_server; rm -f "$tmp"; return 4
+  fi
+  init=$RESPONSE
+  if ! jq -e '.result' <<<"$init" >/dev/null 2>&1; then
+    stop_server; rm -f "$tmp"; return 4
+  fi
+
+  printf '%s\n' '{"method":"initialized"}' \
+    '{"id":2,"method":"account/rateLimits/read","params":null}' \
+    >&"${CODEX_APP[1]}"
+  if ! read_response 2 12; then
+    stop_server; rm -f "$tmp"; return 4
+  fi
+  response=$RESPONSE
+  stop_server
+
+  if jq -e '.result | select(.rateLimits != null)' <<<"$response" >"$tmp" 2>/dev/null; then
+    mv "$tmp" "$CACHE"
+    rm -f "$STALE"
+    return 0
+  fi
+  rm -f "$tmp"
+  return 4
+}
+
+ensure_cache() {
+  local force=${1:-0} age=99999 rc
+  if [[ -f "$CACHE" ]]; then
+    age=$(( $(date +%s) - $(stat -c %Y "$CACHE") ))
+  fi
+  if [[ "$force" == 1 || "$age" -ge "$MAX_AGE" ]]; then
+    fetch; rc=$?
+    (( rc == 0 )) && return 0
+    [[ -f "$CACHE" ]] && { touch "$STALE"; return 0; }
+    return "$rc"
+  fi
+  return 0
+}
+
+humanize() {
+  local s=$1
+  (( s < 0 )) && s=0
+  if   (( s >= 86400 )); then printf '%dd%dh' $(( s/86400 )) $(( (s%86400)/3600 ))
+  elif (( s >= 3600  )); then printf '%dh%dm' $(( s/3600 ))  $(( (s%3600)/60 ))
+  else                        printf '%dm'    $(( s/60 ))
+  fi
+}
+
+window_name() {
+  local mins=$1
+  if   (( mins % 10080 == 0 )); then printf '%dw' $(( mins/10080 ))
+  elif (( mins % 1440  == 0 )); then printf '%dd' $(( mins/1440 ))
+  elif (( mins % 60    == 0 )); then printf '%dh' $(( mins/60 ))
+  else                              printf '%dm' "$mins"
+  fi
+}
+
+pace() { # pace USED WINDOW_MINUTES RESETS_AT
+  local used=$1 mins=$2 reset=$3 now left elapsed delta
+  [[ "$reset" =~ ^[0-9]+$ ]] || { printf '?'; return; }
+  now=$(date +%s); left=$(( reset - now ))
+  elapsed=$(( (mins * 60 - left) * 100 / (mins * 60) ))
+  (( elapsed < 0 )) && elapsed=0; (( elapsed > 100 )) && elapsed=100
+  delta=$(( used - elapsed ))
+  if   (( delta >  10 )); then printf '↑'
+  elif (( delta < -10 )); then printf '↓'
+  else                         printf '→'
+  fi
+}
+
+bar_json() {
+  local snapshot plan stale=false credits balance unlimited
+  snapshot=$(jq -c '.rateLimitsByLimitId.codex // .rateLimits' "$CACHE") || return 4
+  plan=$(jq -r '.planType // "unknown"' <<<"$snapshot")
+  credits=$(jq -r '.credits.hasCredits // false' <<<"$snapshot")
+  unlimited=$(jq -r '.credits.unlimited // false' <<<"$snapshot")
+  balance=$(jq -r '.credits.balance // "0"' <<<"$snapshot")
+  [[ -f "$STALE" ]] && stale=true
+
+  local windows='[]' side pct mins reset left item
+  for side in primary secondary; do
+    mapfile -t fields < <(jq -r --arg side "$side" '
+      .[$side] // empty | [(.usedPercent // 0), (.windowDurationMins // 0), (.resetsAt // 0)] | .[]
+    ' <<<"$snapshot")
+    (( ${#fields[@]} == 3 )) || continue
+    pct=${fields[0]}; mins=${fields[1]}; reset=${fields[2]}
+    (( mins > 0 )) || continue
+    left=$(( reset - $(date +%s) )); (( left < 0 )) && left=0
+    item=$(jq -n --arg name "$(window_name "$mins")" --argjson pct "$pct" \
+      --arg left "$(humanize "$left")" --arg pace "$(pace "$pct" "$mins" "$reset")" \
+      --argjson minutes "$mins" --argjson resets_at "$reset" \
+      '{name:$name,pct:$pct,left:$left,pace:$pace,minutes:$minutes,resets_at:$resets_at}')
+    windows=$(jq -c --argjson item "$item" '. + [$item] | sort_by(.minutes)' <<<"$windows")
+  done
+
+  jq -n --arg plan "$plan" --argjson windows "$windows" \
+    --argjson has_credits "$credits" --argjson unlimited "$unlimited" \
+    --arg balance "$balance" --argjson stale "$stale" \
+    '{provider:"codex",plan:$plan,windows:$windows,
+      credits:{has_credits:$has_credits,unlimited:$unlimited,balance:$balance},stale:$stale}'
+}
+
+MODE=report
+FORCE=0
+while (( $# )); do
+  case "$1" in
+    --json)     MODE=json ;;
+    --bar-json) MODE=bar ;;
+    --refresh)  FORCE=1 ;;
+    --max-age)  [[ $# -ge 2 ]] || { usage >&2; exit 64; }; MAX_AGE=$2; shift ;;
+    -h|--help)  usage; exit 0 ;;
+    *)          printf 'unknown option: %s\n' "$1" >&2; usage >&2; exit 64 ;;
+  esac
+  shift
+done
+
+ensure_cache "$FORCE"; rc=$?
+if (( rc != 0 )); then
+  (( rc == 2 )) && echo 'codex-usage: Codex CLI not found or not logged in' >&2 \
+                  || echo 'codex-usage: could not query Codex rate limits' >&2
+  exit "$rc"
+fi
+
+case "$MODE" in
+  json) cat "$CACHE" ;;
+  bar)  bar_json ;;
+  *)
+    data=$(bar_json) || exit $?
+    printf 'Codex usage (%s)%s\n' "$(jq -r .plan <<<"$data")" \
+      "$([[ $(jq -r .stale <<<"$data") == true ]] && printf ' (stale)')"
+    jq -r '.windows[] | "  \(.name)  \(.pct)% \(.pace)  resets in \(.left)"' <<<"$data"
+    ;;
+esac

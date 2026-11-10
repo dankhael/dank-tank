@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# antigravity-usage — cache and display Antigravity CLI quota snapshots.
+#
+# AGY has no documented non-interactive quota command. Its supported custom
+# statusline receives the live plan/quota payload, so --ingest sanitizes and
+# caches that payload for Noctalia while also rendering a useful AGY statusline.
+
+set -uo pipefail
+
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/antigravity-usage"
+CACHE="$CACHE_DIR/status.json"
+STALE_AFTER="${ANTIGRAVITY_USAGE_STALE_AFTER:-600}"
+
+usage() {
+  cat <<'EOF'
+antigravity-usage — Antigravity quota tracker
+
+  antigravity-usage              compact report from the last AGY snapshot
+  antigravity-usage --bar-json   precomputed fields for a bar widget
+  antigravity-usage --json       sanitized cached status payload
+  antigravity-usage --ingest     AGY statusline command; reads JSON from stdin
+
+The cache updates whenever an interactive AGY session updates its statusline.
+EOF
+}
+
+humanize() {
+  local s=$1
+  (( s < 0 )) && s=0
+  if   (( s >= 86400 )); then printf '%dd%dh' $(( s/86400 )) $(( (s%86400)/3600 ))
+  elif (( s >= 3600  )); then printf '%dh%dm' $(( s/3600 ))  $(( (s%3600)/60 ))
+  else                        printf '%dm'    $(( s/60 ))
+  fi
+}
+
+ingest() {
+  local input tmp
+  input=$(cat)
+  jq -e '.quota | type == "object"' <<<"$input" >/dev/null 2>&1 || {
+    printf 'AGY · quota unavailable'
+    return 0
+  }
+
+  mkdir -p "$CACHE_DIR"
+  tmp=$(mktemp "$CACHE_DIR/.status.XXXXXX")
+  jq --argjson captured_at "$(date +%s)" '
+    { captured_at: $captured_at,
+      plan: (.plan_tier // "unknown"),
+      model: { id: (.model.id // ""), display_name: (.model.display_name // .model.id // "AGY") },
+      context: { used_percentage: (.context_window.used_percentage // 0) },
+      quota: .quota }
+  ' <<<"$input" >"$tmp" && mv "$tmp" "$CACHE"
+
+  local data model context pieces
+  data=$(bar_json) || { printf 'AGY'; return 0; }
+  model=$(jq -r '.model.display_name // "AGY"' <<<"$data")
+  context=$(jq -r '.context.used_percentage // 0 | floor' "$CACHE")
+  pieces=$(jq -r '[.groups[] | (.short + " " + ([.windows[].pct | tostring] | join("/")) + "%")] | join(" · ")' <<<"$data")
+  printf '%s · ctx %s%%' "$model" "$context"
+  [[ -n "$pieces" ]] && printf ' · %s' "$pieces"
+}
+
+bar_json() {
+  [[ -r "$CACHE" ]] || return 2
+
+  local plan model captured age stale=false now
+  now=$(date +%s)
+  plan=$(jq -r '.plan // "unknown"' "$CACHE")
+  model=$(jq -c '.model // {}' "$CACHE")
+  captured=$(jq -r '.captured_at // 0' "$CACHE")
+  age=$(( now - captured )); (( age > STALE_AFTER )) && stale=true
+
+  local gemini='[]' third_party='[]' key pct reset epoch left item target
+  while IFS=$'\t' read -r key pct reset; do
+    [[ -n "$key" ]] || continue
+    epoch=$(date -d "$reset" +%s 2>/dev/null || echo 0)
+    left=$(( epoch - now )); (( left < 0 )) && left=0
+    item=$(jq -n --arg name "${key#*-}" --argjson pct "$pct" \
+      --arg left "$(humanize "$left")" --arg reset_time "$reset" \
+      --argjson resets_at "$epoch" \
+      '{name:$name,pct:$pct,left:$left,reset_time:$reset_time,resets_at:$resets_at}')
+    if [[ "$key" == gemini-* ]]; then
+      gemini=$(jq -c --argjson item "$item" '. + [$item]' <<<"$gemini")
+    elif [[ "$key" == 3p-* ]]; then
+      third_party=$(jq -c --argjson item "$item" '. + [$item]' <<<"$third_party")
+    fi
+  done < <(jq -r '.quota | to_entries[] |
+    [.key, (((1 - (.value.remaining_fraction // 1)) * 100 + 0.5) | floor), (.value.reset_time // "")] | @tsv
+  ' "$CACHE")
+
+  jq -n --arg plan "$plan" --argjson model "$model" \
+    --argjson gemini "$gemini" --argjson third_party "$third_party" \
+    --argjson stale "$stale" --argjson age "$age" \
+    '{provider:"antigravity",plan:$plan,model:$model,
+      groups:[
+        {id:"gemini",label:"Gemini",short:"G",windows:$gemini},
+        {id:"third-party",label:"Third-party",short:"3P",windows:$third_party}
+      ] | map(select(.windows | length > 0)),
+      stale:$stale,age_seconds:$age}'
+}
+
+MODE=report
+while (( $# )); do
+  case "$1" in
+    --ingest)   MODE=ingest ;;
+    --bar-json) MODE=bar ;;
+    --json)     MODE=json ;;
+    --refresh)  ;; # snapshots are pushed by AGY; retained for widget symmetry
+    -h|--help)  usage; exit 0 ;;
+    *)          printf 'unknown option: %s\n' "$1" >&2; usage >&2; exit 64 ;;
+  esac
+  shift
+done
+
+case "$MODE" in
+  ingest) ingest ;;
+  json)   [[ -r "$CACHE" ]] && cat "$CACHE" || exit 2 ;;
+  bar)    bar_json || { echo 'antigravity-usage: no AGY quota snapshot yet' >&2; exit 2; } ;;
+  *)
+    data=$(bar_json) || { echo 'antigravity-usage: start AGY once to capture quota' >&2; exit 2; }
+    printf 'Antigravity usage (%s)%s\n' "$(jq -r .plan <<<"$data")" \
+      "$([[ $(jq -r .stale <<<"$data") == true ]] && printf ' (stale)')"
+    jq -r '.groups[] | .label as $label | .windows[] |
+      "  \($label) \(.name)  \(.pct)% used  resets in \(.left)"' <<<"$data"
+    ;;
+esac

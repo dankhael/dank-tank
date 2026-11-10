@@ -1,0 +1,13 @@
+[Unit]
+Description=dank-tank: check AI plan limits every 5 minutes
+
+[Timer]
+OnStartupSec=1min
+OnUnitActiveSec=5min
+# The rolling windows move slowly; let systemd batch this with other wakeups.
+AccuracySec=30s
+Persistent=false
+Unit=dank-tank-notify.service
+
+[Install]
+WantedBy=timers.target

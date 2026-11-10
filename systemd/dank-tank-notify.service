@@ -1,0 +1,10 @@
+[Unit]
+Description=dank-tank: poll AI plan limits and notify on threshold crossings
+Documentation=https://github.com/dankhael/dank-tank
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/dank-tank-notify
+# The notifier is idempotent and exits 0 when there is nothing to say; a
+# non-zero exit means the script itself broke, so let it show up in the journal.

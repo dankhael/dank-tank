@@ -1,0 +1,81 @@
+{
+  "title": "dank-tank",
+  "claude": "Claude",
+  "codex": "Codex",
+  "antigravity": "Antigravity",
+  "opencode": "OpenCode Go",
+  "plan": "Plan",
+  "session": "Session (5h)",
+  "weekly": "Weekly (7d)",
+  "credits": "Credits",
+  "unlimited": "unlimited",
+  "resets_in": "resets in",
+  "refresh": "Refresh now",
+  "hint": "Click for details · right-click to refresh",
+  "stale": "showing a cached reading",
+  "pace_legend": "↑ ahead of pace · → on track · ↓ under",
+  "error": {
+    "failed": "claude-usage could not be run",
+    "bad_output": "claude-usage returned something unreadable",
+    "no_command": "No usage command configured",
+    "codex_failed": "codex-usage could not be run",
+    "codex_bad_output": "codex-usage returned something unreadable",
+    "antigravity_failed": "antigravity-usage has no quota snapshot",
+    "antigravity_bad_output": "antigravity-usage returned something unreadable",
+    "opencode_failed": "opencode-usage could not be run",
+    "opencode_bad_output": "opencode-usage returned something unreadable"
+  },
+  "settings": {
+    "command": {
+      "label": "Claude command",
+      "description": "Path to the claude-usage script."
+    },
+    "codex_command": {
+      "label": "Codex command",
+      "description": "Path to the codex-usage script."
+    },
+    "show_codex": {
+      "label": "Show Codex",
+      "description": "Add all rate-limit windows reported by your Codex plan."
+    },
+    "antigravity_command": {
+      "label": "Antigravity command",
+      "description": "Path to the antigravity-usage script."
+    },
+    "show_antigravity": {
+      "label": "Show Antigravity",
+      "description": "Add Gemini and third-party 5-hour and weekly quotas from AGY."
+    },
+    "opencode_command": {
+      "label": "OpenCode command",
+      "description": "Path to the opencode-usage script."
+    },
+    "show_opencode": {
+      "label": "Show OpenCode Go",
+      "description": "Add the 5-hour, weekly and monthly limits of your OpenCode Go plan."
+    },
+    "glyph": {
+      "label": "Icon"
+    },
+    "show_spend": {
+      "label": "Show credit spend",
+      "description": "Add extra-usage spending, when credits are enabled on the account."
+    },
+    "refresh_seconds": {
+      "label": "Refresh interval (seconds)",
+      "description": "How often to re-read usage. The command caches for 60s, so lower values mostly re-read that cache."
+    },
+    "warn_at": {
+      "label": "Warn at (%)",
+      "description": "Percentage at which the number turns amber."
+    },
+    "warn_color": {
+      "label": "Warning color",
+      "description": "Color for percentages past the warning threshold. Themes disagree on which accent means caution, so this one is fixed rather than a palette role."
+    },
+    "alert_at": {
+      "label": "Alert at (%)",
+      "description": "Percentage at which the number turns red."
+    }
+  }
+}
