@@ -183,7 +183,7 @@ local function card(agent)
   else
     local stale = model.staleText(agent)
     if stale then
-      local serious = agent.failure or agent.staleReason == "auth"
+      local serious = agent.failure or agent.staleReason == "auth" or agent.staleReason == "login"
       table.insert(children, note(
         "stale",
         serious and "alert-triangle" or agent.outdated and "history" or "clock",

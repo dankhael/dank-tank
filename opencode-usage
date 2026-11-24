@@ -13,8 +13,10 @@ DB="${XDG_DATA_HOME:-$HOME/.local/share}/opencode/opencode.db"
 AUTH_JSON="${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/opencode-usage"
 CACHE="$CACHE_DIR/usage.json"
-STALE="$CACHE_DIR/stale"
 MAX_AGE="${OPENCODE_USAGE_MAX_AGE:-60}"
+
+HERE="$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")"
+. "$HERE/usage-cache.sh" || { echo "opencode-usage: usage-cache.sh is missing from $HERE" >&2; exit 1; }
 
 usage() {
   cat <<'EOF'
@@ -52,74 +54,17 @@ api_key() {
 }
 
 fetch() {
-  local key tmp code
+  local key code
   key=$(api_key) || return 2
-  mkdir -p "$CACHE_DIR"
-  tmp=$(mktemp "$CACHE_DIR/.fetch.XXXXXX")
-  TMP_FILE=$tmp
+  make_temp
   code=$(printf 'Authorization: Bearer %s\n' "$key" |
-    curl -sS -m 15 -o "$tmp" -w '%{http_code}' -H @- "$ENDPOINT" 2>/dev/null) || code=000
+    curl -sS -m 15 -o "$TMP_FILE" -w '%{http_code}' -H @- "$ENDPOINT" 2>/dev/null) || code=000
   case "$code" in
-    200)
-      if jq -e '.usage | type == "object"' "$tmp" >/dev/null 2>&1; then
-        mv "$tmp" "$CACHE"; rm -f "$STALE"; return 0
-      fi ;;
-    401|403) rm -f "$tmp"; return 3 ;;
-    429)     rm -f "$tmp"; return 5 ;;
+    200)     jq -e '.usage | type == "object"' "$TMP_FILE" >/dev/null 2>&1 && mv "$TMP_FILE" "$CACHE" ;;
+    401|403) return 3 ;;
+    429)     return 5 ;;
+    *)       return 4 ;;
   esac
-  rm -f "$tmp"
-  return 4
-}
-
-# Seconds since FILE was last written; huge when it does not exist.
-age_of() {
-  local at
-  at=$(stat -c %Y "$1" 2>/dev/null) || { echo 999999; return; }
-  echo $(( $(date +%s) - at ))
-}
-
-stale_reason() { [[ -f "$STALE" ]] && { read -r REPLY < "$STALE"; printf '%s' "${REPLY:-network}"; }; }
-
-# After a failure, wait before asking again instead of retrying on every poll.
-backing_off() {
-  local wait=60
-  [[ -f "$STALE" ]] || return 1
-  [[ $(stale_reason) == rate ]] && wait=300
-  (( $(age_of "$STALE") < wait ))
-}
-
-failed() { # failed RC — record why, and fall back to the last good reading
-  case "$1" in
-    2|3) echo auth > "$STALE" ;;
-    5)   echo rate > "$STALE" ;;
-    *)   echo network > "$STALE" ;;
-  esac
-  [[ -f "$CACHE" ]] && return 0
-  return $(( $1 == 5 ? 4 : $1 ))
-}
-
-ensure_cache() {
-  local force=${1:-0} started rc
-  started=$(date +%s)
-  if [[ "$force" != 1 ]]; then
-    (( $(age_of "$CACHE") < MAX_AGE )) && return 0
-    if backing_off; then
-      [[ -f "$CACHE" ]] && return 0
-      [[ $(stale_reason) == auth ]] && return 3
-      return 4
-    fi
-  fi
-
-  # One fetch at a time: the bar, the timer and a shell can all land here at
-  # once, and whoever waited finds the answer already written.
-  mkdir -p "$CACHE_DIR"
-  exec 9>"$CACHE_DIR/.lock"
-  flock -w 20 9 || { [[ -f "$CACHE" ]]; return; }
-  (( $(stat -c %Y "$CACHE" 2>/dev/null || echo 0) >= started )) && return 0
-  find "$CACHE_DIR" -maxdepth 1 -name '.fetch.*' -mmin +10 -delete 2>/dev/null
-  fetch; rc=$?
-  (( rc == 0 )) && return 0
-  failed "$rc"
 }
 
 humanize() {
@@ -174,11 +119,6 @@ bar_json() {
     '{provider:"opencode",plan:"Go",windows:$windows,
       stale:$stale,stale_reason:$reason,fetched_at:$fetched_at}'
 }
-
-TMP_FILE=''
-trap '[[ -n "$TMP_FILE" ]] && rm -f "$TMP_FILE"' EXIT
-trap 'exit 143' TERM
-trap 'exit 130' INT
 
 MODE=report
 FORCE=0

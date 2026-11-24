@@ -14,12 +14,15 @@ API="https://api.anthropic.com/api/oauth/usage"
 CREDS="${CLAUDE_CREDENTIALS:-$HOME/.claude/.credentials.json}"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/claude-usage"
 CACHE="$CACHE_DIR/usage.json"
-STALE="$CACHE_DIR/stale"
 
 CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/dank-tank/config.env"
 [[ -r "$CONFIG" ]] || CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/claude-usage/config.env"
 [[ -r "$CONFIG" ]] && . "$CONFIG"
 MAX_AGE="${CLAUDE_USAGE_MAX_AGE:-60}"
+CREDENTIALS=$CREDS
+
+HERE="$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")"
+. "$HERE/usage-cache.sh" || { echo "claude-usage: usage-cache.sh is missing from $HERE" >&2; exit 1; }
 
 usage() {
   cat <<'EOF'
@@ -40,72 +43,22 @@ EOF
 # ---------------------------------------------------------------- fetch + cache
 
 fetch() {
-  mkdir -p "$CACHE_DIR"
-
-  local token
+  local token code
   token=$(jq -r '.claudeAiOauth.accessToken // empty' "$CREDS" 2>/dev/null)
-  [[ -z "$token" ]] && return 2
+  [[ -n "$token" ]] || return 2
 
-  local tmp code
-  tmp=$(mktemp "$CACHE_DIR/.fetch.XXXXXX")
-  TMP_FILE=$tmp
-  code=$(curl -sS --max-time 10 -o "$tmp" -w '%{http_code}' "$API" \
+  make_temp
+  code=$(curl -sS --max-time 10 -o "$TMP_FILE" -w '%{http_code}' "$API" \
     -H 'Accept: application/json' \
     -H "Authorization: Bearer $token" \
     -H 'anthropic-beta: oauth-2025-04-20' 2>/dev/null)
 
   case "$code" in
-    200)
-      if jq -e . "$tmp" >/dev/null 2>&1; then
-        mv "$tmp" "$CACHE"; rm -f "$STALE"; return 0
-      fi
-      rm -f "$tmp"; return 4 ;;
-    401|403) rm -f "$tmp"; echo auth    > "$STALE"; return 3 ;;
-    429)     rm -f "$tmp"; echo rate    > "$STALE"; return 4 ;;
-    *)       rm -f "$tmp"; echo network > "$STALE"; return 4 ;;
+    200)     jq -e 'type == "object"' "$TMP_FILE" >/dev/null 2>&1 && mv "$TMP_FILE" "$CACHE" ;;
+    401|403) return 3 ;;
+    429)     return 5 ;;
+    *)       return 4 ;;
   esac
-}
-
-# Seconds since FILE was last written; huge when it does not exist.
-age_of() {
-  local at
-  at=$(stat -c %Y "$1" 2>/dev/null) || { echo 999999; return; }
-  echo $(( $(date +%s) - at ))
-}
-
-stale_reason() { [[ -f "$STALE" ]] && { read -r REPLY < "$STALE"; printf '%s' "${REPLY:-network}"; }; }
-
-# After a failure, wait before asking again instead of retrying on every poll.
-# A credentials file newer than the failure means Claude Code just refreshed the
-# token, so that one is worth retrying right away.
-backing_off() {
-  local wait=60
-  [[ -f "$STALE" && ! "$CREDS" -nt "$STALE" ]] || return 1
-  [[ $(stale_reason) == rate ]] && wait=300
-  (( $(age_of "$STALE") < wait ))
-}
-
-# Fetch only if the cache is missing or older than MAX_AGE. Always leaves the
-# last good payload in $CACHE so callers can degrade gracefully.
-ensure_cache() {
-  local force="${1:-0}" started
-  started=$(date +%s)
-  if [[ "$force" != 1 ]]; then
-    (( $(age_of "$CACHE") < MAX_AGE )) && return 0
-    if backing_off; then
-      [[ $(stale_reason) == auth ]] && return 3
-      return 4
-    fi
-  fi
-
-  # One fetch at a time: the bar, the timer and a shell can all land here at
-  # once, and whoever waited finds the answer already written.
-  mkdir -p "$CACHE_DIR"
-  exec 9>"$CACHE_DIR/.lock"
-  flock -w 20 9 || return 4
-  (( $(stat -c %Y "$CACHE" 2>/dev/null || echo 0) >= started )) && return 0
-  find "$CACHE_DIR" -maxdepth 1 -name '.fetch.*' -mmin +10 -delete 2>/dev/null
-  fetch
 }
 
 # ------------------------------------------------------------------- formatting
@@ -270,11 +223,6 @@ line() {
 }
 
 # ------------------------------------------------------------------------- main
-
-TMP_FILE=''
-trap '[[ -n "$TMP_FILE" ]] && rm -f "$TMP_FILE"' EXIT
-trap 'exit 143' TERM
-trap 'exit 130' INT
 
 MODE=report
 FORCE=0

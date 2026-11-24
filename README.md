@@ -214,10 +214,14 @@ in an end lane, set the panel's *Position* to that end (Settings → Plugins →
 gear on dank-tank).
 
 Background reads happen every 2 minutes, and every 5 for Codex, whose query has to
-start an app-server. Opening the panel asks for anything older than 30 s. The
-commands serialise their own fetches, so the widget, the timer and a shell asking
-at once cost one request, and they wait 60 s (5 min when rate limited) before
-retrying after a failure.
+start an app-server. Both count from the reading itself, whoever fetched it.
+Opening the panel asks for anything older than 30 s.
+
+The commands share `usage-cache.sh`, which they find next to themselves through
+their symlinks. It serialises fetches, so the widget, the timer and a shell asking
+at once cost one request; `--refresh` accepts only a query that began after it was
+asked for. After a failure it waits 60 s (5 min when rate limited) before retrying,
+and whatever the reason, the older reading is reported as stale.
 
 `install.sh` registers the source and enables the plugin. Placing it in a lane
 is the one manual step:

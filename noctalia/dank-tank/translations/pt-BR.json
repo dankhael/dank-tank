@@ -28,6 +28,7 @@
   "stale": "Última leitura {time}",
   "outdated": "Todas as janelas renovaram desde a última leitura, {time}",
   "stale_reason": {
+    "login": "sem login",
     "auth": "login expirado",
     "rate": "limite de requisições",
     "network": "não deu para atualizar"

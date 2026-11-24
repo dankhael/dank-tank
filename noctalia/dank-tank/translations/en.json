@@ -28,6 +28,7 @@
   "stale": "Last reading {time}",
   "outdated": "Every window has reset since the last reading, {time}",
   "stale_reason": {
+    "login": "not signed in",
     "auth": "sign-in expired",
     "rate": "rate limited",
     "network": "could not refresh"

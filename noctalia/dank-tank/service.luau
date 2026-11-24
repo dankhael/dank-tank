@@ -29,6 +29,10 @@ local function refreshSeconds()
   return math.max(30, tonumber(model.conf("refresh_seconds")) or 120)
 end
 
+local function everySeconds(provider)
+  return math.max(refreshSeconds(), provider.minSeconds or 0)
+end
+
 local function publish()
   local snapshot = { data = data, failure = failure }
   local encoded = noctalia.json.encode(snapshot)
@@ -54,7 +58,7 @@ local function explain(provider, res)
   return noctalia.tr("error.failed", { code = tostring(res.exitCode) })
 end
 
-local pollOne
+local pollOne, schedule
 
 local function finish(provider, res)
   local key = provider.key
@@ -75,6 +79,7 @@ local function finish(provider, res)
     queued[key] = nil
     pollOne(provider, true, 0)
   end
+  schedule()
   publish()
 end
 
@@ -89,6 +94,7 @@ function pollOne(provider, force, maxAge)
     return
   end
 
+  polledAt[key] = now
   local bin = noctalia.expandPath(tostring(model.conf(provider.setting)))
   if bin:sub(1, 1) == "/" and not noctalia.fileExists(bin) then
     failure[key] = noctalia.tr("error.not_found", { path = bin })
@@ -103,7 +109,6 @@ function pollOne(provider, force, maxAge)
     table.insert(argv, tostring(maxAge))
   end
   startedAt[key] = now
-  polledAt[key] = now
   -- The host caps concurrent commands; when it declines, the next tick retries.
   local accepted = noctalia.runAsync(argv, function(res) finish(provider, res) end, TIMEOUT_MS)
   if not accepted then
@@ -116,21 +121,44 @@ local function poll(force, maxAge)
   for _, provider in ipairs(model.PROVIDERS) do
     if model.enabled(provider) then pollOne(provider, force, maxAge) end
   end
+  schedule()
   publish()
 end
 
--- Background tick. A little slack on both sides: ticks drift, and a cache the
--- timer refreshed moments ago is as good as a query of our own.
+-- When a provider is due again. Readings also arrive through the timer and the
+-- shell, so the age of the reading decides; when that says nothing (a failure, or
+-- Antigravity, which is pushed) the last attempt does.
+local function dueAt(provider)
+  local polled = polledAt[provider.key]
+  if not polled then return 0 end
+  local every = everySeconds(provider)
+  local reading = data[provider.key]
+  if reading and not reading.stale and not failure[provider.key] then
+    local due = (tonumber(reading.fetched_at) or 0) + every
+    if due > polled then return math.min(due, polled + every) end
+  end
+  return polled + every
+end
+
+-- Wake up for whichever provider is due first: a fixed tick would round every
+-- other interval up to its own multiples.
+function schedule()
+  local soonest = model.now() + refreshSeconds()
+  for _, provider in ipairs(model.PROVIDERS) do
+    if model.enabled(provider) then soonest = math.min(soonest, dueAt(provider)) end
+  end
+  noctalia.setUpdateInterval(math.max(5, soonest - model.now()) * 1000)
+end
+
 function update()
-  local every = refreshSeconds()
-  noctalia.setUpdateInterval(every * 1000)
   local now = model.now()
   for _, provider in ipairs(model.PROVIDERS) do
-    local due = math.max(every, provider.minSeconds or 0)
-    if model.enabled(provider) and now - (polledAt[provider.key] or 0) >= due - 5 then
-      pollOne(provider, false, math.max(15, due - 15))
+    if model.enabled(provider) and now >= dueAt(provider) then
+      -- Accept what someone else fetched since our reading, but not our reading.
+      pollOne(provider, false, everySeconds(provider) - 15)
     end
   end
+  schedule()
   publish()
 end
 
@@ -140,7 +168,6 @@ function onConfigChanged()
       data[provider.key], failure[provider.key] = nil, nil
     end
   end
-  noctalia.setUpdateInterval(refreshSeconds() * 1000)
   poll(false, refreshSeconds())
 end
 

@@ -10,8 +10,10 @@ set -uo pipefail
 CODEX_BIN="${CODEX_USAGE_BIN:-codex}"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/codex-usage"
 CACHE="$CACHE_DIR/rate-limits.json"
-STALE="$CACHE_DIR/stale"
 MAX_AGE="${CODEX_USAGE_MAX_AGE:-60}"
+
+HERE="$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")"
+. "$HERE/usage-cache.sh" || { echo "codex-usage: usage-cache.sh is missing from $HERE" >&2; exit 1; }
 
 usage() {
   cat <<'EOF'
@@ -27,126 +29,67 @@ Exit codes: 0 ok · 2 Codex unavailable/not logged in · 4 query failed
 EOF
 }
 
-APP_PID='' APP_IN='' APP_OUT='' TMP_FILE=''
+APP_PID='' APP_IN='' APP_OUT=''
+
+# Not a coproc: bash unsets a coproc's variables whenever it notices the process
+# is gone, and a server that dies at once would race every read of them.
+start_server() {
+  local pipe="$TMP_FILE.in" server_in
+  mkfifo "$pipe" || return 1
+  # Opened read-write first so neither open blocks waiting for the other end.
+  # The server gets a read-only end and must not inherit ours, so that it sees
+  # EOF if this script is killed, nor the fetch lock (fd 9).
+  exec {APP_IN}<>"$pipe" {server_in}<"$pipe"
+  rm -f "$pipe"
+  exec {APP_OUT}< <(exec "$CODEX_BIN" app-server --listen stdio:// \
+    <&"$server_in" 2>/dev/null {APP_IN}>&- {server_in}<&- 9>&-)
+  APP_PID=$!
+  exec {server_in}<&-
+}
 
 stop_server() {
-  if [[ -n "$APP_PID" ]]; then
-    exec {APP_IN}>&- {APP_OUT}<&-
-    kill "$APP_PID" 2>/dev/null || true
-    wait "$APP_PID" 2>/dev/null || true
-    APP_PID=''
-  fi
+  [[ -n "$APP_PID" ]] || return 0
+  exec {APP_IN}>&- {APP_OUT}<&-
+  kill "$APP_PID" 2>/dev/null
+  wait "$APP_PID" 2>/dev/null
+  APP_PID=''
 }
+trap 'stop_server; discard_temp' EXIT
 
-cleanup() {
-  stop_server
-  [[ -n "$TMP_FILE" ]] && rm -f "$TMP_FILE"
-}
-trap cleanup EXIT
-trap 'exit 143' TERM
-trap 'exit 130' INT
-# The server may exit before reading what we send; that is an ordinary failure.
-trap '' PIPE
+send() { printf '%s\n' "$@" >&"$APP_IN"; }
 
 # Read one JSON-RPC response with the requested numeric id. Notifications may
-# arrive between responses, so ignore every other line.
+# arrive between responses, so ignore every other line. A server that exits ends
+# the stream, which ends the wait.
 read_response() { # read_response ID TIMEOUT
-  local wanted=$1 timeout=$2 line id
-  local deadline=$(( $(date +%s) + timeout ))
-  while (( $(date +%s) < deadline )); do
-    if IFS= read -r -t 1 line <&"$APP_OUT"; then
-      id=$(jq -r '.id // empty' <<<"$line" 2>/dev/null)
-      if [[ "$id" == "$wanted" ]]; then
-        RESPONSE=$line
-        return 0
-      fi
-    elif ! kill -0 "$APP_PID" 2>/dev/null; then
-      return 1
+  local wanted=$1 line left deadline=$(( SECONDS + $2 ))
+  while left=$(( deadline - SECONDS )); (( left > 0 )); do
+    IFS= read -r -t "$left" line <&"$APP_OUT" || return 1
+    if [[ $(jq -r '.id // empty' <<<"$line" 2>/dev/null) == "$wanted" ]]; then
+      RESPONSE=$line
+      return 0
     fi
   done
   return 1
 }
 
+query() {
+  send '{"id":1,"method":"initialize","params":{"clientInfo":{"name":"codex-usage","version":"1.0"},"capabilities":{"experimentalApi":true}}}'
+  read_response 1 8 && jq -e '.result' <<<"$RESPONSE" >/dev/null 2>&1 || return 4
+  send '{"method":"initialized"}' '{"id":2,"method":"account/rateLimits/read","params":null}'
+  read_response 2 12 || return 4
+}
+
 fetch() {
+  local rc
   command -v "$CODEX_BIN" >/dev/null 2>&1 || return 2
-  mkdir -p "$CACHE_DIR"
-
-  local tmp init response
-  tmp=$(mktemp "$CACHE_DIR/.fetch.XXXXXX")
-  TMP_FILE=$tmp
-
-  # bash unsets CODEX_APP the moment the server exits, which under `set -u`
-  # would abort the script mid-fetch, so work from copies. The server must not
-  # inherit the fetch lock (fd 9) either.
-  coproc CODEX_APP { exec "$CODEX_BIN" app-server --listen stdio:// 2>/dev/null 9>&-; }
-  APP_PID=$CODEX_APP_PID
-  exec {APP_OUT}<&"${CODEX_APP[0]}" {APP_IN}>&"${CODEX_APP[1]}"
-  printf '%s\n' \
-    '{"id":1,"method":"initialize","params":{"clientInfo":{"name":"codex-usage","version":"1.0"},"capabilities":{"experimentalApi":true}}}' \
-    >&"$APP_IN" 2>/dev/null
-  if ! read_response 1 8; then
-    stop_server; rm -f "$tmp"; return 4
-  fi
-  init=$RESPONSE
-  if ! jq -e '.result' <<<"$init" >/dev/null 2>&1; then
-    stop_server; rm -f "$tmp"; return 4
-  fi
-
-  printf '%s\n' '{"method":"initialized"}' \
-    '{"id":2,"method":"account/rateLimits/read","params":null}' \
-    >&"$APP_IN" 2>/dev/null
-  if ! read_response 2 12; then
-    stop_server; rm -f "$tmp"; return 4
-  fi
-  response=$RESPONSE
+  make_temp
+  start_server || return 4
+  query; rc=$?
   stop_server
-
-  if jq -e '.result | select(.rateLimits != null)' <<<"$response" >"$tmp" 2>/dev/null; then
-    mv "$tmp" "$CACHE"
-    rm -f "$STALE"
-    return 0
-  fi
-  rm -f "$tmp"
-  return 4
-}
-
-# Seconds since FILE was last written; huge when it does not exist.
-age_of() {
-  local at
-  at=$(stat -c %Y "$1" 2>/dev/null) || { echo 999999; return; }
-  echo $(( $(date +%s) - at ))
-}
-
-stale_reason() { [[ -f "$STALE" ]] && { read -r REPLY < "$STALE"; printf '%s' "${REPLY:-network}"; }; }
-
-failed() { # failed RC — record why, and fall back to the last good reading
-  if [[ "$1" == 2 ]]; then echo auth > "$STALE"; else echo network > "$STALE"; fi
-  [[ -f "$CACHE" ]] && return 0
-  return "$1"
-}
-
-ensure_cache() {
-  local force=${1:-0} started rc
-  started=$(date +%s)
-  if [[ "$force" != 1 ]]; then
-    (( $(age_of "$CACHE") < MAX_AGE )) && return 0
-    # After a failure, wait before spawning another app-server.
-    if (( $(age_of "$STALE") < 60 )); then
-      [[ -f "$CACHE" ]] && return 0
-      return 4
-    fi
-  fi
-
-  # One fetch at a time: the bar, the timer and a shell can all land here at
-  # once, and whoever waited finds the answer already written.
-  mkdir -p "$CACHE_DIR"
-  exec 9>"$CACHE_DIR/.lock"
-  flock -w 25 9 || { [[ -f "$CACHE" ]]; return; }
-  (( $(stat -c %Y "$CACHE" 2>/dev/null || echo 0) >= started )) && return 0
-  find "$CACHE_DIR" -maxdepth 1 -name '.fetch.*' -mmin +10 -delete 2>/dev/null
-  fetch; rc=$?
-  (( rc == 0 )) && return 0
-  failed "$rc"
+  (( rc == 0 )) || return "$rc"
+  jq -e '.result | select(.rateLimits != null)' <<<"$RESPONSE" >"$TMP_FILE" 2>/dev/null &&
+    mv "$TMP_FILE" "$CACHE"
 }
 
 humanize() {
