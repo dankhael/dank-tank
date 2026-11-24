@@ -188,12 +188,13 @@ status line's cache warm for terminals where Claude Code has not yet reported.
 What they share (providers, windows, pace, colours) lives in `lib/model.luau`.
 
 The bar carries **one number per agent** — the window closest to its limit — as
-`C 46% │ X 27% │ A 0% │ O 15%`. Numbers stay in plain ink until they pass a
-threshold, and the icon follows the worst of all. A dash means no reading applies
-right now, which is not the same as 0%; a dimmed number is an old reading. On
-monitors narrower than 1500 px (portrait ones included) the automatic style drops
-to `C46 X27 A0 O15` so it fits beside the clock and the tray; side bars stack the
-chips. *Bar style* in the settings forces full, compact, or only the most used.
+`46% │ 27% │ 0% │ 15%`, each beside its provider's logo. Numbers stay in plain ink
+until they pass a threshold, and the icon follows the worst of all. A dash means no
+reading applies right now, which is not the same as 0%; a dimmed number is an old
+reading. On monitors narrower than 1500 px (portrait ones included) the automatic
+style drops the `%` and the dividers so it fits beside the clock and the tray; side
+bars stack the chips. *Bar style* in the settings forces full, compact, or only the
+most used.
 
 Left click opens the **detail panel**: one card per agent with every window. The
 tick on each bar is where an even burn would be by now, `↑` marks a window running
@@ -247,6 +248,11 @@ interval, warning/alert thresholds and the warning colour. That colour is a plai
 rather than a palette role — `error` is red in every theme, but the accent roles
 that would fit the middle band are green in plenty of them, which reads as fine
 rather than as caution.
+
+The logos in `noctalia/dank-tank/assets/logos/` are trademarks of Anthropic, OpenAI,
+Google and OpenCode, used only to identify each provider. The SVGs come from
+[Lobe Icons](https://github.com/lobehub/lobe-icons) (MIT, see the `LICENSE` next to
+them), trimmed to fit; this project is not affiliated with any of them.
 
 ## Other bars
 

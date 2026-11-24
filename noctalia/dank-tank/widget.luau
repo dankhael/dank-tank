@@ -4,6 +4,8 @@
 
 local model = require("./lib/model.luau")
 
+local LOGO = 15
+
 local snapshot = noctalia.state.get("snapshot")
 
 -- Where this instance lives. The host only fills these in for its own events
@@ -57,12 +59,12 @@ end
 
 local function chip(agent, suffix)
   local text, color, opacity = reading(agent, suffix)
-  local letter = ui.label({ text = agent.letter, color = "on_surface_variant", fontSize = vertical and 10 or nil })
+  local logo = ui.image({ path = model.logo(agent.key), width = LOGO, height = LOGO, fit = "contain" })
   local value = ui.label({ text = text, color = color, fontWeight = "bold", fontSize = vertical and 11 or nil })
   if vertical then
-    return ui.column({ key = agent.key, gap = 0, align = "center", opacity = opacity }, { letter, value })
+    return ui.column({ key = agent.key, gap = 1, align = "center", opacity = opacity }, { logo, value })
   end
-  return ui.row({ key = agent.key, gap = suffix == "" and 2 or 3, align = "center", opacity = opacity }, { letter, value })
+  return ui.row({ key = agent.key, gap = suffix == "" and 3 or 5, align = "center", opacity = opacity }, { logo, value })
 end
 
 local function tooltip(list)
@@ -117,7 +119,7 @@ local function render()
   end
 
   local container = vertical and ui.column or ui.row
-  barWidget.render(container({ gap = vertical and 5 or 7, align = "center" }, items))
+  barWidget.render(container({ gap = vertical and 5 or mode == "compact" and 6 or 7, align = "center" }, items))
   barWidget.setTooltip(tooltip(list))
 end
 
@@ -127,9 +129,9 @@ noctalia.state.watch("snapshot", function(value)
 end)
 
 -- Readings arrive through the watch; this only keeps countdowns and rolled-over
--- windows honest between them.
+-- windows honest between them, and the OpenCode logo in step with the theme.
 function update()
-  noctalia.setUpdateInterval(60000)
+  noctalia.setUpdateInterval(15000)
   locate()
   render()
 end

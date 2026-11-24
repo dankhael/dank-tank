@@ -11,7 +11,7 @@
 
 id = "dankhael/dank-tank"
 name = "dank-tank"
-version = "4.0.0"
+version = "4.1.0"
 # 48 for onResume; also needs 42 (content-sized panels) and 43 (palette roles).
 plugin_api = 48
 author = "dankhael"

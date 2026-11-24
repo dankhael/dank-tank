@@ -129,18 +129,9 @@ local function note(key, glyph, color, text, ink)
   })
 end
 
--- The same letter the bar uses, so the panel doubles as its legend.
 local function badge(agent)
-  local color = agent.worst and model.colorFor(agent.worst) or (agent.failure and "error" or "on_surface_variant")
-  return ui.row({
-    width = 22,
-    height = 22,
-    radius = 7,
-    align = "center",
-    justify = "center",
-    fill = model.tint(color, 0.18),
-  }, {
-    ui.label({ text = agent.letter, fontSize = 12, fontWeight = "bold", color = color }),
+  return ui.row({ width = 24, height = 24, radius = 7, align = "center", justify = "center", fill = "on_surface/0.07" }, {
+    ui.image({ path = model.logo(agent.key), width = 16, height = 16, fit = "contain" }),
   })
 end
 

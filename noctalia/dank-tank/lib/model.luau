@@ -12,12 +12,12 @@ local M = {}
 M.PANEL = "dankhael/dank-tank:detail"
 
 M.PROVIDERS = {
-  { key = "claude", letter = "C", setting = "command", toggle = "show_claude" },
+  { key = "claude", setting = "command", toggle = "show_claude" },
   -- Each Codex query starts a local app-server, which costs far more than the
   -- plain HTTP reads, so it gets a floor of its own.
-  { key = "codex", letter = "X", setting = "codex_command", toggle = "show_codex", minSeconds = 300 },
-  { key = "antigravity", letter = "A", setting = "antigravity_command", toggle = "show_antigravity" },
-  { key = "opencode", letter = "O", setting = "opencode_command", toggle = "show_opencode" },
+  { key = "codex", setting = "codex_command", toggle = "show_codex", minSeconds = 300 },
+  { key = "antigravity", setting = "antigravity_command", toggle = "show_antigravity" },
+  { key = "opencode", setting = "opencode_command", toggle = "show_opencode" },
 }
 
 local DEFAULTS = {
@@ -112,12 +112,11 @@ function M.inkFor(pct)
   return color
 end
 
--- A translucent version of a role ("primary") or of a "#rrggbb" literal.
-function M.tint(color, alpha)
-  if color:sub(1, 1) == "#" then
-    return color:sub(1, 7) .. string.format("%02x", math.floor(alpha * 255 + 0.5))
-  end
-  return `{color:match("^[^/]+")}/{alpha}`
+-- The provider's own mark. They keep their brand colours, except OpenCode's, which
+-- is monochrome and needs the version that shows on the current surface.
+function M.logo(key)
+  if key == "opencode" then key = noctalia.isDarkMode() and "opencode-dark" or "opencode-light" end
+  return `assets/logos/{key}.svg`
 end
 
 --------------------------------------------------------------------------------
@@ -252,7 +251,6 @@ function M.agents(snapshot)
       local source = data[provider.key]
       local agent = source and BUILDERS[provider.key](source) or { rows = {} }
       agent.key = provider.key
-      agent.letter = provider.letter
       agent.name = noctalia.tr(`provider.{provider.key}`)
       agent.failure = failure[provider.key]
       agent.hasData = source ~= nil
