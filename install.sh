@@ -16,7 +16,7 @@ AGY_SETTINGS="$HOME/.gemini/antigravity-cli/settings.json"
 
 say() { printf '  %s\n' "$*"; }
 
-for dep in jq curl notify-send awk; do
+for dep in jq curl notify-send awk flock; do
   command -v "$dep" >/dev/null || { echo "missing dependency: $dep" >&2; exit 1; }
 done
 

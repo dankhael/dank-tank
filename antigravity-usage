@@ -68,17 +68,24 @@ bar_json() {
   plan=$(jq -r '.plan // "unknown"' "$CACHE")
   model=$(jq -c '.model // {}' "$CACHE")
   captured=$(jq -r '.captured_at // 0' "$CACHE")
+  [[ "$captured" =~ ^[0-9]+$ ]] || captured=0
   age=$(( now - captured )); (( age > STALE_AFTER )) && stale=true
 
-  local gemini='[]' third_party='[]' key pct reset epoch left item target
+  local gemini='[]' third_party='[]' key pct reset epoch left item minutes
   while IFS=$'\t' read -r key pct reset; do
     [[ -n "$key" ]] || continue
     epoch=$(date -d "$reset" +%s 2>/dev/null || echo 0)
     left=$(( epoch - now )); (( left < 0 )) && left=0
-    item=$(jq -n --arg name "${key#*-}" --argjson pct "$pct" \
+    case "$key" in
+      *5h)     minutes=300 ;;
+      *weekly) minutes=10080 ;;
+      *)       minutes=0 ;;
+    esac
+    item=$(jq -n --arg name "${key#*-}" --argjson pct "$pct" --argjson minutes "$minutes" \
       --arg left "$(humanize "$left")" --arg reset_time "$reset" \
       --argjson resets_at "$epoch" \
-      '{name:$name,pct:$pct,left:$left,reset_time:$reset_time,resets_at:$resets_at}')
+      '{name:$name,pct:$pct,left:$left,minutes:$minutes,
+        reset_time:$reset_time,resets_at:$resets_at}')
     if [[ "$key" == gemini-* ]]; then
       gemini=$(jq -c --argjson item "$item" '. + [$item]' <<<"$gemini")
     elif [[ "$key" == 3p-* ]]; then
@@ -90,13 +97,13 @@ bar_json() {
 
   jq -n --arg plan "$plan" --argjson model "$model" \
     --argjson gemini "$gemini" --argjson third_party "$third_party" \
-    --argjson stale "$stale" --argjson age "$age" \
+    --argjson stale "$stale" --argjson age "$age" --argjson captured "$captured" \
     '{provider:"antigravity",plan:$plan,model:$model,
       groups:[
         {id:"gemini",label:"Gemini",short:"G",windows:$gemini},
         {id:"third-party",label:"Third-party",short:"3P",windows:$third_party}
       ] | map(select(.windows | length > 0)),
-      stale:$stale,age_seconds:$age}'
+      stale:$stale,age_seconds:$age,fetched_at:$captured}'
 }
 
 MODE=report
@@ -105,7 +112,9 @@ while (( $# )); do
     --ingest)   MODE=ingest ;;
     --bar-json) MODE=bar ;;
     --json)     MODE=json ;;
-    --refresh)  ;; # snapshots are pushed by AGY; retained for widget symmetry
+    # Snapshots are pushed by AGY; both are accepted for widget symmetry.
+    --refresh)  ;;
+    --max-age)  [[ $# -ge 2 ]] || { usage >&2; exit 64; }; shift ;;
     -h|--help)  usage; exit 0 ;;
     *)          printf 'unknown option: %s\n' "$1" >&2; usage >&2; exit 64 ;;
   esac
@@ -121,6 +130,7 @@ case "$MODE" in
     printf 'Antigravity usage (%s)%s\n' "$(jq -r .plan <<<"$data")" \
       "$([[ $(jq -r .stale <<<"$data") == true ]] && printf ' (stale)')"
     jq -r '.groups[] | .label as $label | .windows[] |
-      "  \($label) \(.name)  \(.pct)% used  resets in \(.left)"' <<<"$data"
+      "  \($label) \(.name)  \(.pct)% used  " +
+      (if .resets_at > 0 and .resets_at <= now then "window has since reset" else "resets in \(.left)" end)' <<<"$data"
     ;;
 esac

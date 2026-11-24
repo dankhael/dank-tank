@@ -27,12 +27,26 @@ Exit codes: 0 ok · 2 Codex unavailable/not logged in · 4 query failed
 EOF
 }
 
+APP_PID='' APP_IN='' APP_OUT='' TMP_FILE=''
+
 stop_server() {
-  if [[ -n "${CODEX_APP_PID:-}" ]]; then
-    kill "$CODEX_APP_PID" 2>/dev/null || true
-    wait "$CODEX_APP_PID" 2>/dev/null || true
+  if [[ -n "$APP_PID" ]]; then
+    exec {APP_IN}>&- {APP_OUT}<&-
+    kill "$APP_PID" 2>/dev/null || true
+    wait "$APP_PID" 2>/dev/null || true
+    APP_PID=''
   fi
 }
+
+cleanup() {
+  stop_server
+  [[ -n "$TMP_FILE" ]] && rm -f "$TMP_FILE"
+}
+trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+# The server may exit before reading what we send; that is an ordinary failure.
+trap '' PIPE
 
 # Read one JSON-RPC response with the requested numeric id. Notifications may
 # arrive between responses, so ignore every other line.
@@ -40,13 +54,13 @@ read_response() { # read_response ID TIMEOUT
   local wanted=$1 timeout=$2 line id
   local deadline=$(( $(date +%s) + timeout ))
   while (( $(date +%s) < deadline )); do
-    if IFS= read -r -t 1 line <&"${CODEX_APP[0]}"; then
+    if IFS= read -r -t 1 line <&"$APP_OUT"; then
       id=$(jq -r '.id // empty' <<<"$line" 2>/dev/null)
       if [[ "$id" == "$wanted" ]]; then
         RESPONSE=$line
         return 0
       fi
-    elif ! kill -0 "$CODEX_APP_PID" 2>/dev/null; then
+    elif ! kill -0 "$APP_PID" 2>/dev/null; then
       return 1
     fi
   done
@@ -59,11 +73,17 @@ fetch() {
 
   local tmp init response
   tmp=$(mktemp "$CACHE_DIR/.fetch.XXXXXX")
+  TMP_FILE=$tmp
 
-  coproc CODEX_APP { "$CODEX_BIN" app-server --listen stdio:// 2>/dev/null; }
+  # bash unsets CODEX_APP the moment the server exits, which under `set -u`
+  # would abort the script mid-fetch, so work from copies. The server must not
+  # inherit the fetch lock (fd 9) either.
+  coproc CODEX_APP { exec "$CODEX_BIN" app-server --listen stdio:// 2>/dev/null 9>&-; }
+  APP_PID=$CODEX_APP_PID
+  exec {APP_OUT}<&"${CODEX_APP[0]}" {APP_IN}>&"${CODEX_APP[1]}"
   printf '%s\n' \
     '{"id":1,"method":"initialize","params":{"clientInfo":{"name":"codex-usage","version":"1.0"},"capabilities":{"experimentalApi":true}}}' \
-    >&"${CODEX_APP[1]}"
+    >&"$APP_IN" 2>/dev/null
   if ! read_response 1 8; then
     stop_server; rm -f "$tmp"; return 4
   fi
@@ -74,7 +94,7 @@ fetch() {
 
   printf '%s\n' '{"method":"initialized"}' \
     '{"id":2,"method":"account/rateLimits/read","params":null}' \
-    >&"${CODEX_APP[1]}"
+    >&"$APP_IN" 2>/dev/null
   if ! read_response 2 12; then
     stop_server; rm -f "$tmp"; return 4
   fi
@@ -90,18 +110,43 @@ fetch() {
   return 4
 }
 
+# Seconds since FILE was last written; huge when it does not exist.
+age_of() {
+  local at
+  at=$(stat -c %Y "$1" 2>/dev/null) || { echo 999999; return; }
+  echo $(( $(date +%s) - at ))
+}
+
+stale_reason() { [[ -f "$STALE" ]] && { read -r REPLY < "$STALE"; printf '%s' "${REPLY:-network}"; }; }
+
+failed() { # failed RC — record why, and fall back to the last good reading
+  if [[ "$1" == 2 ]]; then echo auth > "$STALE"; else echo network > "$STALE"; fi
+  [[ -f "$CACHE" ]] && return 0
+  return "$1"
+}
+
 ensure_cache() {
-  local force=${1:-0} age=99999 rc
-  if [[ -f "$CACHE" ]]; then
-    age=$(( $(date +%s) - $(stat -c %Y "$CACHE") ))
+  local force=${1:-0} started rc
+  started=$(date +%s)
+  if [[ "$force" != 1 ]]; then
+    (( $(age_of "$CACHE") < MAX_AGE )) && return 0
+    # After a failure, wait before spawning another app-server.
+    if (( $(age_of "$STALE") < 60 )); then
+      [[ -f "$CACHE" ]] && return 0
+      return 4
+    fi
   fi
-  if [[ "$force" == 1 || "$age" -ge "$MAX_AGE" ]]; then
-    fetch; rc=$?
-    (( rc == 0 )) && return 0
-    [[ -f "$CACHE" ]] && { touch "$STALE"; return 0; }
-    return "$rc"
-  fi
-  return 0
+
+  # One fetch at a time: the bar, the timer and a shell can all land here at
+  # once, and whoever waited finds the answer already written.
+  mkdir -p "$CACHE_DIR"
+  exec 9>"$CACHE_DIR/.lock"
+  flock -w 25 9 || { [[ -f "$CACHE" ]]; return; }
+  (( $(stat -c %Y "$CACHE" 2>/dev/null || echo 0) >= started )) && return 0
+  find "$CACHE_DIR" -maxdepth 1 -name '.fetch.*' -mmin +10 -delete 2>/dev/null
+  fetch; rc=$?
+  (( rc == 0 )) && return 0
+  failed "$rc"
 }
 
 humanize() {
@@ -163,8 +208,10 @@ bar_json() {
   jq -n --arg plan "$plan" --argjson windows "$windows" \
     --argjson has_credits "$credits" --argjson unlimited "$unlimited" \
     --arg balance "$balance" --argjson stale "$stale" \
+    --arg reason "$(stale_reason)" --argjson fetched_at "$(stat -c %Y "$CACHE")" \
     '{provider:"codex",plan:$plan,windows:$windows,
-      credits:{has_credits:$has_credits,unlimited:$unlimited,balance:$balance},stale:$stale}'
+      credits:{has_credits:$has_credits,unlimited:$unlimited,balance:$balance},
+      stale:$stale,stale_reason:$reason,fetched_at:$fetched_at}'
 }
 
 MODE=report

@@ -66,9 +66,9 @@ if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
   if [[ -S "${XDG_RUNTIME_DIR:-/run/user/$UID}/bus" ]]; then
     export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR:-/run/user/$UID}/bus"
   else
-    "$CLAUDE_USAGE" --refresh --no-color >/dev/null 2>&1 || true
-    "$CODEX_USAGE" --refresh --bar-json >/dev/null 2>&1 || true
-    "$OPENCODE_USAGE" --refresh --bar-json >/dev/null 2>&1 || true
+    "$CLAUDE_USAGE" --max-age 60 --no-color >/dev/null 2>&1 || true
+    "$CODEX_USAGE" --max-age 240 --bar-json >/dev/null 2>&1 || true
+    "$OPENCODE_USAGE" --max-age 60 --bar-json >/dev/null 2>&1 || true
     exit 0
   fi
 fi
@@ -200,8 +200,16 @@ check() {
 
 # ---------------------------------------------------------------- Claude
 
-"$CLAUDE_USAGE" --refresh --no-color >/dev/null 2>&1
+claude_data=$("$CLAUDE_USAGE" --max-age 60 --bar-json 2>/dev/null)
 claude_rc=$?
+# Readings a minute old (four for Codex, whose query is costly) are shared with
+# the bar instead of fetched twice, and a rate-limited provider is left alone.
+# With a cache to fall back on claude-usage succeeds even when the fetch did not,
+# so the reason comes from the payload; old numbers must not raise alerts.
+if (( claude_rc == 0 )) && [[ $(jq -r '.stale // false' <<<"$claude_data") == true ]]; then
+  claude_rc=4
+  [[ $(jq -r '.stale_reason // ""' <<<"$claude_data") == auth ]] && claude_rc=3
+fi
 if (( claude_rc == 0 )); then
   rm -f "$CACHE_DIR/.auth-warned"
   mapfile -t U < <("$CLAUDE_USAGE" --json 2>/dev/null | jq -r '
@@ -230,8 +238,8 @@ fi
 
 # ---------------------------------------------------------------- Codex
 
-codex_data=$("$CODEX_USAGE" --refresh --bar-json 2>/dev/null) || codex_data=''
-if [[ -n "$codex_data" ]]; then
+codex_data=$("$CODEX_USAGE" --max-age 240 --bar-json 2>/dev/null) || codex_data=''
+if [[ -n "$codex_data" && $(jq -r '.stale == false' <<<"$codex_data") == true ]]; then
   while IFS=$'\t' read -r name pct minutes reset; do
     [[ -n "$name" ]] || continue
     key=${name//[^a-zA-Z0-9]/-}
@@ -249,7 +257,7 @@ if [[ -n "$agy_data" && $(jq -r '.stale == false' <<<"$agy_data") == true ]]; th
     [[ -n "$group_id" && -n "$name" ]] || continue
     key=${group_id//[^a-zA-Z0-9]/-}-${name//[^a-zA-Z0-9]/-}
     thresholds=$ANTIGRAVITY_SESSION_THRESHOLDS
-    [[ "$name" == weekly ]] && thresholds=$ANTIGRAVITY_WEEKLY_THRESHOLDS
+    [[ "$name" == *weekly ]] && thresholds=$ANTIGRAVITY_WEEKLY_THRESHOLDS
     check "agy-$key" "Antigravity $group_label $name" "$pct" "$reset" "$thresholds" "$(resets_in "@$reset")"
   done < <(jq -r '.groups[] | .id as $id | .label as $label | .windows[] |
     [$id,$label,.name,.pct,.resets_at] | @tsv' <<<"$agy_data")
@@ -257,7 +265,7 @@ fi
 
 # ---------------------------------------------------------------- OpenCode Go
 
-opencode_data=$("$OPENCODE_USAGE" --refresh --bar-json 2>/dev/null) || opencode_data=''
+opencode_data=$("$OPENCODE_USAGE" --max-age 60 --bar-json 2>/dev/null) || opencode_data=''
 if [[ -n "$opencode_data" && $(jq -r '.stale == false' <<<"$opencode_data") == true ]]; then
   while IFS=$'\t' read -r name pct minutes reset; do
     [[ -n "$name" ]] || continue

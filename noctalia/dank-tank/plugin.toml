@@ -1,43 +1,68 @@
 # dank-tank: Claude, Codex, Antigravity and OpenCode Go plan usage in the noctalia bar.
 #
-# The widget owns no quota arithmetic — it shells out to `claude-usage` and
-# provider commands, which cache their respective snapshots and precompute reset
-# countdowns and pacing.
+# The plugin owns no quota arithmetic — it shells out to `claude-usage` and the
+# other provider commands, which cache their snapshots.
 #
-# Two entries share one script: the bar widget shows the worst window per agent,
-# and the `detail` panel it toggles shows every window. Each entry runs in its
-# own VM and calls its own entry point, so usage.luau serves both.
+# Three entries: the `poller` service is the only one that runs commands, the
+# `usage` bar widget shows the worst window per agent, and the `detail` panel it
+# toggles shows every window. Whatever they share lives in lib/model.luau.
 #
 # Add it from Settings -> Bar -> (a lane) -> Add widget -> dank-tank.
 
 id = "dankhael/dank-tank"
 name = "dank-tank"
-version = "3.0.0"
-plugin_api = 16
+version = "4.0.0"
+# 48 for onResume; also needs 42 (content-sized panels) and 43 (palette roles).
+plugin_api = 48
 author = "dankhael"
 license = "MIT"
-dependencies = []
+dependencies = ["jq", "curl"]
 tags = ["claude", "codex", "antigravity", "agy", "opencode", "usage", "monitor"]
 icon = "gauge"
 description = "Claude, Codex, Antigravity and OpenCode Go plan limits in the bar."
 
-# Plugin-level settings: the bar widget and the detail panel read the same
-# commands and the same thresholds, so they are declared once here (Settings ->
-# Plugins) instead of per entry.
+# Plugin-level settings: every entry reads the same commands and the same
+# thresholds, so they are declared once here (Settings -> Plugins).
 
 [[setting]]
-key = "command"
-type = "string"
-label_key = "settings.command.label"
-description_key = "settings.command.description"
-default = "~/.local/bin/claude-usage"
+key = "bar_style"
+type = "select"
+label_key = "settings.bar_style.label"
+description_key = "settings.bar_style.description"
+default = "auto"
+options = [
+  { value = "auto", label_key = "settings.bar_style.auto" },
+  { value = "full", label_key = "settings.bar_style.full" },
+  { value = "compact", label_key = "settings.bar_style.compact" },
+  { value = "minimal", label_key = "settings.bar_style.minimal" },
+]
 
 [[setting]]
-key = "codex_command"
-type = "string"
-label_key = "settings.codex_command.label"
-description_key = "settings.codex_command.description"
-default = "~/.local/bin/codex-usage"
+key = "compact_below"
+type = "int"
+label_key = "settings.compact_below.label"
+description_key = "settings.compact_below.description"
+default = 1500
+min = 600
+max = 4000
+step = 50
+advanced = true
+visible_when = { key = "bar_style", values = ["auto"] }
+
+[[setting]]
+key = "show_claude"
+type = "bool"
+label_key = "settings.show_claude.label"
+description_key = "settings.show_claude.description"
+default = true
+
+[[setting]]
+key = "show_spend"
+type = "bool"
+label_key = "settings.show_spend.label"
+description_key = "settings.show_spend.description"
+default = false
+visible_when = { key = "show_claude", values = ["true"] }
 
 [[setting]]
 key = "show_codex"
@@ -47,25 +72,11 @@ description_key = "settings.show_codex.description"
 default = true
 
 [[setting]]
-key = "antigravity_command"
-type = "string"
-label_key = "settings.antigravity_command.label"
-description_key = "settings.antigravity_command.description"
-default = "~/.local/bin/antigravity-usage"
-
-[[setting]]
 key = "show_antigravity"
 type = "bool"
 label_key = "settings.show_antigravity.label"
 description_key = "settings.show_antigravity.description"
 default = true
-
-[[setting]]
-key = "opencode_command"
-type = "string"
-label_key = "settings.opencode_command.label"
-description_key = "settings.opencode_command.description"
-default = "~/.local/bin/opencode-usage"
 
 [[setting]]
 key = "show_opencode"
@@ -75,26 +86,10 @@ description_key = "settings.show_opencode.description"
 default = true
 
 [[setting]]
-key = "show_spend"
-type = "bool"
-label_key = "settings.show_spend.label"
-description_key = "settings.show_spend.description"
-default = false
-
-[[setting]]
 key = "glyph"
 type = "glyph"
 label_key = "settings.glyph.label"
 default = "gauge"
-
-# The command caches for 60s by default, so polling faster than that mostly
-# re-reads the same file rather than hitting the network.
-[[setting]]
-key = "refresh_seconds"
-type = "int"
-label_key = "settings.refresh_seconds.label"
-description_key = "settings.refresh_seconds.description"
-default = 60
 
 [[setting]]
 key = "warn_at"
@@ -102,6 +97,8 @@ type = "int"
 label_key = "settings.warn_at.label"
 description_key = "settings.warn_at.description"
 default = 50
+min = 0
+max = 100
 
 [[setting]]
 key = "warn_color"
@@ -116,15 +113,70 @@ type = "int"
 label_key = "settings.alert_at.label"
 description_key = "settings.alert_at.description"
 default = 80
+min = 0
+max = 100
+
+[[setting]]
+key = "refresh_seconds"
+type = "int"
+label_key = "settings.refresh_seconds.label"
+description_key = "settings.refresh_seconds.description"
+default = 120
+min = 30
+max = 3600
+step = 30
+
+[[setting]]
+key = "command"
+type = "string"
+label_key = "settings.command.label"
+description_key = "settings.command.description"
+default = "~/.local/bin/claude-usage"
+advanced = true
+
+[[setting]]
+key = "codex_command"
+type = "string"
+label_key = "settings.codex_command.label"
+description_key = "settings.codex_command.description"
+default = "~/.local/bin/codex-usage"
+advanced = true
+
+[[setting]]
+key = "antigravity_command"
+type = "string"
+label_key = "settings.antigravity_command.label"
+description_key = "settings.antigravity_command.description"
+default = "~/.local/bin/antigravity-usage"
+advanced = true
+
+[[setting]]
+key = "opencode_command"
+type = "string"
+label_key = "settings.opencode_command.label"
+description_key = "settings.opencode_command.description"
+default = "~/.local/bin/opencode-usage"
+advanced = true
+
+[[service]]
+id = "poller"
+entry = "service.luau"
 
 [[widget]]
 id = "usage"
-entry = "usage.luau"
+entry = "widget.luau"
 
+# open_near_click stays off: for a widget the host anchors that to the pointer,
+# not to the widget, so the panel would land somewhere else on every click.
+# Centred on the bar it always opens in the same place; with the widget in an end
+# lane, set the panel's Position to that end (Settings -> Plugins).
 [[panel]]
 id = "detail"
-entry = "usage.luau"
+entry = "panel.luau"
 width = 430
-height = 640
+height = "content"
+max_height = 900
 placement = "attached"
-open_near_click = true
+position = "auto"
+open_near_click = false
+capture_keys = ["r"]

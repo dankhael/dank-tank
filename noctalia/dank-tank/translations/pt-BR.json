@@ -1,0 +1,124 @@
+{
+  "title": "dank-tank",
+  "provider": {
+    "claude": "Claude",
+    "codex": "Codex",
+    "antigravity": "Antigravity",
+    "opencode": "OpenCode Go"
+  },
+  "window": {
+    "5h": "5 horas",
+    "24h": "24 horas",
+    "7d": "7 dias",
+    "1mo": "1 mês"
+  },
+  "third_party": "Terceiros",
+  "credits": "Créditos",
+  "unlimited": "ilimitado",
+  "expired": "renovou",
+  "just_now": "agora",
+  "ago": "há {time}",
+  "loading": "Carregando…",
+  "nothing_enabled": "Todos os provedores estão desligados nas configurações do plugin.",
+  "updating": "Atualizando…",
+  "updated": "Atualizado {time}",
+  "refresh": "Atualizar agora (R)",
+  "open_settings": "Configurações",
+  "close": "Fechar",
+  "stale": "Última leitura {time}",
+  "outdated": "Todas as janelas renovaram desde a última leitura, {time}",
+  "stale_reason": {
+    "auth": "login expirado",
+    "rate": "limite de requisições",
+    "network": "não deu para atualizar"
+  },
+  "runs_out": "{window}: acaba em {time} nesse ritmo",
+  "runs_out_key": "Acaba em",
+  "limit_reached": "Limite atingido · renova em {time}",
+  "limit_reached_bare": "Limite atingido",
+  "legend_pace": "ritmo uniforme",
+  "legend_ahead": "acima do ritmo",
+  "tip": {
+    "unavailable": "indisponível",
+    "outdated": "sem leitura nova",
+    "elapsed": "{pct} da janela já passou",
+    "resets": "Renova {time}",
+    "expired": "A janela renovou {time}; esperando uma leitura nova",
+    "runs_out": "Nesse ritmo acaba {time}"
+  },
+  "error": {
+    "failed": "O comando falhou (saída {code})",
+    "bad_output": "O comando devolveu algo ilegível",
+    "timeout": "O comando demorou demais",
+    "not_found": "Não encontrado: {path}"
+  },
+  "settings": {
+    "show_claude": {
+      "label": "Mostrar Claude",
+      "description": "Limites de 5 horas e semanal do seu plano Claude."
+    },
+    "show_codex": {
+      "label": "Mostrar Codex",
+      "description": "Todas as janelas de limite informadas pelo seu plano Codex."
+    },
+    "show_antigravity": {
+      "label": "Mostrar Antigravity",
+      "description": "Cotas de 5 horas e semanais do Gemini e de terceiros, vindas do AGY."
+    },
+    "show_opencode": {
+      "label": "Mostrar OpenCode Go",
+      "description": "Limites de 5 horas, semanal e mensal do seu plano OpenCode Go."
+    },
+    "show_spend": {
+      "label": "Mostrar gasto de créditos",
+      "description": "Adiciona o gasto extra ao Claude, quando a conta tem créditos ativados."
+    },
+    "bar_style": {
+      "label": "Estilo na barra",
+      "description": "Quanto espaço o widget ocupa na barra. O automático usa o compacto em monitores estreitos ou em pé.",
+      "auto": "Automático",
+      "full": "Completo",
+      "compact": "Compacto",
+      "minimal": "Só o mais usado"
+    },
+    "compact_below": {
+      "label": "Compacto abaixo de (px)",
+      "description": "Monitores mais estreitos que isso recebem o estilo compacto quando o estilo é automático."
+    },
+    "glyph": {
+      "label": "Ícone"
+    },
+    "refresh_seconds": {
+      "label": "Intervalo de atualização (segundos)",
+      "description": "De quanto em quanto tempo reler o uso em segundo plano. O Codex é lido no máximo a cada 5 minutos. Abrir o painel sempre pede números novos."
+    },
+    "warn_at": {
+      "label": "Avisar em (%)",
+      "description": "Porcentagem em que o número fica âmbar."
+    },
+    "warn_color": {
+      "label": "Cor de aviso",
+      "description": "Cor das porcentagens acima do limite de aviso. Os temas discordam sobre qual cor significa cautela, então esta é fixa em vez de vir da paleta."
+    },
+    "alert_at": {
+      "label": "Alertar em (%)",
+      "description": "Porcentagem em que o número fica vermelho."
+    },
+    "command": {
+      "label": "Comando do Claude",
+      "description": "Caminho do script claude-usage."
+    },
+    "codex_command": {
+      "label": "Comando do Codex",
+      "description": "Caminho do script codex-usage."
+    },
+    "antigravity_command": {
+      "label": "Comando do Antigravity",
+      "description": "Caminho do script antigravity-usage."
+    },
+    "opencode_command": {
+      "label": "Comando do OpenCode",
+      "description": "Caminho do script opencode-usage."
+    }
+  }
+}
