@@ -4,8 +4,11 @@
 # `fetch`, which writes a fresh reading to $CACHE and returns
 #   0 ok · 2 not signed in · 3 credentials rejected · 5 rate limited · else failed
 #
-# $STALE exists exactly while the last attempt failed. It holds the reason, and
-# its age is how long ago that was.
+# `fetch` must check the payload before replacing $CACHE: whatever it accepts is
+# shown as a current reading.
+#
+# $STALE exists exactly while the last attempt failed. It holds the reason and,
+# on a second line, when it failed in microseconds; its age drives the backoff.
 
 STALE="$CACHE_DIR/stale"
 BEGAN="$CACHE_DIR/.began" # when the query behind $CACHE started, in microseconds
@@ -48,13 +51,24 @@ backing_off() {
 # Record why a fetch failed. Succeeds when an older reading can stand in for it,
 # which is then reported as stale.
 failed() {
+  local reason
   case "$1" in
-    2) echo login   > "$STALE" ;;
-    3) echo auth    > "$STALE" ;;
-    5) echo rate    > "$STALE" ;;
-    *) echo network > "$STALE" ;;
+    2) reason=login ;;
+    3) reason=auth ;;
+    5) reason=rate ;;
+    *) reason=network ;;
   esac
+  printf '%s\n%s\n' "$reason" "$(now_us)" > "$STALE"
   still_failed
+}
+
+# Whether the failure on record happened after ASKED, so that asking again would
+# only repeat it.
+failed_since() { # failed_since ASKED
+  local at=''
+  [[ -f "$STALE" ]] || return 1
+  { read -r _; read -r at; } < "$STALE"
+  [[ "$at" =~ ^[0-9]+$ ]] && (( at >= $1 ))
 }
 
 # Same outcome as the failure already on record, without recording a new one.
@@ -79,11 +93,13 @@ ensure_cache() {
 
   # One fetch at a time: the bar, the timer and a shell can all land here at
   # once, and whoever waited may find the question already answered. A forced
-  # refresh accepts only a query that began after it was asked for.
+  # refresh accepts only a query that began after it was asked for; a failure
+  # that came in meanwhile is answer enough.
   mkdir -p "$CACHE_DIR"
   exec 9>"$CACHE_DIR/.lock"
   flock -w 25 9 || { failed 4; return; }
   if [[ "$force" == 1 ]]; then
+    failed_since "$asked" && { still_failed; return; }
     [[ -f "$CACHE" && ! -f "$STALE" ]] && read -r began 2>/dev/null < "$BEGAN" &&
       [[ "$began" =~ ^[0-9]+$ ]] && (( began >= asked )) && return 0
   else

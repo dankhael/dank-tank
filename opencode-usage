@@ -53,6 +53,13 @@ api_key() {
   printf '%s' "$key"
 }
 
+# At least one known window, and every one present with a usable percentage.
+valid() {
+  jq -e '[.usage | .rolling, .weekly, .monthly] | map(select(. != null)) |
+    length > 0 and all(type == "object" and (.percent | type) == "number")' \
+    "$1" >/dev/null 2>&1
+}
+
 fetch() {
   local key code
   key=$(api_key) || return 2
@@ -60,7 +67,7 @@ fetch() {
   code=$(printf 'Authorization: Bearer %s\n' "$key" |
     curl -sS -m 15 -o "$TMP_FILE" -w '%{http_code}' -H @- "$ENDPOINT" 2>/dev/null) || code=000
   case "$code" in
-    200)     jq -e '.usage | type == "object"' "$TMP_FILE" >/dev/null 2>&1 && mv "$TMP_FILE" "$CACHE" ;;
+    200)     valid "$TMP_FILE" && mv "$TMP_FILE" "$CACHE" ;;
     401|403) return 3 ;;
     429)     return 5 ;;
     *)       return 4 ;;

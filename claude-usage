@@ -42,6 +42,14 @@ EOF
 
 # ---------------------------------------------------------------- fetch + cache
 
+# An error body is JSON too, and `load` would read the missing windows as 0%. A
+# window may be null, but both cannot be.
+valid() {
+  jq -e '[.five_hour, .seven_day] | map(select(. != null)) |
+    length > 0 and all(type == "object" and (.utilization | type) == "number")' \
+    "$1" >/dev/null 2>&1
+}
+
 fetch() {
   local token code
   token=$(jq -r '.claudeAiOauth.accessToken // empty' "$CREDS" 2>/dev/null)
@@ -54,7 +62,7 @@ fetch() {
     -H 'anthropic-beta: oauth-2025-04-20' 2>/dev/null)
 
   case "$code" in
-    200)     jq -e 'type == "object"' "$TMP_FILE" >/dev/null 2>&1 && mv "$TMP_FILE" "$CACHE" ;;
+    200)     valid "$TMP_FILE" && mv "$TMP_FILE" "$CACHE" ;;
     401|403) return 3 ;;
     429)     return 5 ;;
     *)       return 4 ;;

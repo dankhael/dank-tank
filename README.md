@@ -220,8 +220,10 @@ Opening the panel asks for anything older than 30 s.
 The commands share `usage-cache.sh`, which they find next to themselves through
 their symlinks. It serialises fetches, so the widget, the timer and a shell asking
 at once cost one request; `--refresh` accepts only a query that began after it was
-asked for. After a failure it waits 60 s (5 min when rate limited) before retrying,
-and whatever the reason, the older reading is reported as stale.
+asked for, or a failure that came in while it waited. A response without usable
+percentages counts as a failure and never replaces the last reading. After a
+failure it waits 60 s (5 min when rate limited) before retrying, and whatever the
+reason, the older reading is reported as stale.
 
 `install.sh` registers the source and enables the plugin. Placing it in a lane
 is the one manual step:

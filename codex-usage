@@ -80,6 +80,16 @@ query() {
   read_response 2 12 || return 4
 }
 
+# Every window present needs a usable percentage. A plan may have none at all, as
+# long as it says something about credits.
+valid() {
+  jq -e '(.rateLimitsByLimitId.codex // .rateLimits) |
+    ([.primary, .secondary] | map(select(. != null))) as $windows |
+    ($windows | all(type == "object" and (.usedPercent | type) == "number")) and
+    (($windows | length) > 0 or (.credits | type) == "object")' \
+    "$1" >/dev/null 2>&1
+}
+
 fetch() {
   local rc
   command -v "$CODEX_BIN" >/dev/null 2>&1 || return 2
@@ -88,8 +98,8 @@ fetch() {
   query; rc=$?
   stop_server
   (( rc == 0 )) || return "$rc"
-  jq -e '.result | select(.rateLimits != null)' <<<"$RESPONSE" >"$TMP_FILE" 2>/dev/null &&
-    mv "$TMP_FILE" "$CACHE"
+  jq -e '.result' <<<"$RESPONSE" >"$TMP_FILE" 2>/dev/null &&
+    valid "$TMP_FILE" && mv "$TMP_FILE" "$CACHE"
 }
 
 humanize() {
